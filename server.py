@@ -237,19 +237,16 @@ async def reply(request: Request) -> dict:
 
 @app.post("/v1/teardown")
 async def teardown() -> dict:
-    global contexts, conversations, dispatch
-    from store import ContextStore, ConversationStore, DispatchState
-
-    contexts = ContextStore()
-    conversations = ConversationStore()
-    dispatch = DispatchState()
-
-    # Rebind in the modules that imported them by name.
-    import store as _store
-
-    _store.contexts = contexts
-    _store.conversations = conversations
-    _store.dispatch = dispatch
+    # Clear the stores IN PLACE. Rebinding them to fresh objects looks like it
+    # works — the new objects are empty, and any module that looks the store up
+    # as `store.contexts` sees them — but every module that did
+    # `from store import contexts` at import time (tick.py and reply_handler.py
+    # both do) keeps a reference to the OLD object and never sees the new data.
+    # Symptom: contexts push fine, /v1/healthz reports them loaded, and
+    # /v1/tick returns {"actions": []} in under half a second forever after.
+    contexts.reset()
+    conversations.reset()
+    dispatch.reset()
 
     return {"wiped": True, "at": utc_now_iso()}
 

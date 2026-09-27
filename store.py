@@ -61,7 +61,12 @@ class ContextStore:
         self._lock = threading.RLock()
 
     def reset(self) -> None:
-        """Drop all stored context. Tests only — see ConversationStore.reset."""
+        """Drop all stored context, in place.
+
+        Mutates rather than rebinds, because several modules hold a reference
+        obtained via `from store import contexts`. /v1/teardown calls this, so
+        it is a production path, not a test-only one.
+        """
         with self._lock:
             self._data.clear()
 
@@ -213,12 +218,11 @@ class ConversationStore:
         self._lock = threading.RLock()
 
     def reset(self) -> None:
-        """Drop all conversation state.
+        """Drop all conversation state, in place.
 
-        Only the test suites call this. The judge never restarts the bot
-        mid-test, so there is no production path that needs this — it exists
-        so a test can assert determinism against genuinely fresh state instead
-        of state left behind by the previous test.
+        Mutates rather than rebinds, for the reason given in
+        ContextStore.reset. /v1/teardown calls this, and the test suites use it
+        to assert determinism against genuinely fresh state.
         """
         with self._lock:
             self._data.clear()
@@ -288,7 +292,12 @@ class DispatchState:
     closed_conversations: set[str] = field(default_factory=set)
 
     def reset(self) -> None:
-        """Forget everything we have sent. Tests only — see ConversationStore.reset."""
+        """Forget everything we have sent, in place.
+
+        Mutates rather than rebinds — see ContextStore.reset. /v1/teardown calls
+        this, so a bot that was torn down can accept a fresh test run without
+        being redeployed.
+        """
         self.sent_suppressions.clear()
         self.last_sent_to.clear()
         self.opted_out.clear()

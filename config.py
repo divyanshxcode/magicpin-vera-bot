@@ -13,10 +13,17 @@ which is what the judge spec requires.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+#: When this process started, ISO-8601 UTC. Reported as `submitted_at` so the
+#: judge sees a real timestamp rather than an empty string. Set SUBMITTED_AT
+#: explicitly to override.
+_BOOTED_AT = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _env_int(name: str, default: int) -> int:
@@ -137,5 +144,5 @@ def metadata() -> dict:
         "approach": approach,
         "contact_email": CONTACT_EMAIL,
         "version": BOT_VERSION,
-        "submitted_at": _env("SUBMITTED_AT", ""),
+        "submitted_at": _env("SUBMITTED_AT", _BOOTED_AT),
     }

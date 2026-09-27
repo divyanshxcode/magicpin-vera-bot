@@ -27,12 +27,11 @@ from pathlib import Path
 
 JUDGE = Path("/Users/divyansh-air/Local Disk/Codes/Github Clones/magicpin/judge_simulator.py")
 BOT = os.environ.get("BOT_URL", "http://localhost:8080")
+# No default. The judge needs a real key to score with, and a key hardcoded
+# here would end up in git history — which is exactly what happened once.
 KEY = os.environ.get("LLM_API_KEY", "")
-# The judge must emit strict JSON. Measured on one real message via the judge's
-# own prompt: poolside returns valid JSON, ling-3.0-flash-fin burns all 1500
-# tokens on reasoning and returns an EMPTY body (score collapses to 5/10
-# everywhere), so the bot's faster model is unusable as a judge here. The
-# judge's own LLM is a separate concern from the bot's.
+# A judge wants a careful, reasoning-capable model. The bot's own model is
+# poolside; the judge is a separate concern and can be stronger.
 JUDGE_MODEL = os.environ.get("JUDGE_MODEL", "poolside/laguna-s-2.1:free")
 
 GREEN, RED, DIM, CYAN, YELLOW, BOLD, RESET = (
@@ -85,6 +84,9 @@ class NousProvider:
 def main() -> int:
     if not JUDGE.exists():
         print(f"{RED}judge_simulator.py not found at {JUDGE}{RESET}")
+        return 1
+    if not KEY:
+        print(f"{RED}Set LLM_API_KEY{RESET}  (e.g. LLM_API_KEY=... .venv/bin/python run_judge.py)")
         return 1
 
     # The bot must be up and already holding context, or every score is zero.

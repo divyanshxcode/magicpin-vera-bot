@@ -1,0 +1,19 @@
+# Railway reads this to know how to build and run the service.
+#
+# The service must bind to 0.0.0.0 and read $PORT, or Railway's healthcheck
+# will never reach it. Nothing secret lives here — LLM keys are set as Railway
+# service variables at deploy time.
+
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "uvicorn server:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/v1/healthz"
+healthcheckTimeout = 100
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3
+
+# One instance only. The judge talks to a single bot and expects consistent
+# conversation state; a second replica would hold a different in-memory view.
+numReplicas = 1

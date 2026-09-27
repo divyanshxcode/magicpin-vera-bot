@@ -6,7 +6,11 @@ authors = ["Team Alpha"]
 packages = [{ include = "*.py" }]
 
 [tool.poetry.dependencies]
-python = "^3.11"
+# 3.13, not "^3.11". pydantic-core 2.27.2 ships prebuilt wheels for cp310-cp313
+# only, so a resolver that allows 3.14 ends up compiling it from Rust, which
+# fails on hosts with a read-only cargo registry (Render) and is slow
+# everywhere else. Matched by .python-version and PYTHON_VERSION in render.yaml.
+python = "~3.13"
 fastapi = "0.115.6"
 uvicorn = { version = "0.34.0", extras = ["standard"] }
 pydantic = "2.10.4"

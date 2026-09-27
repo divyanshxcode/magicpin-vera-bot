@@ -27,6 +27,14 @@ services:
     healthCheckTimeout: 45
     autoDeploy: false
     envVars:
+      # Render otherwise defaults to Python 3.14, and pydantic-core 2.27.2 has
+      # no cp314 wheel — so pip falls back to building it from Rust via maturin
+      # and dies on Render's read-only cargo registry. Any 3.13.x has a
+      # prebuilt manylinux wheel, so pin the minor only and let the host pick
+      # the patch. .python-version says the same thing.
+      - key: PYTHON_VERSION
+        value: "3.13"
+
       # Identity the judge reads from GET /v1/metadata.
       - key: TEAM_NAME
         value: "Divyansh Singh"

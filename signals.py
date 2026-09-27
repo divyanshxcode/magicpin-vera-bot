@@ -252,16 +252,21 @@ def _research_signals(category: dict, merchant: dict, trigger: dict, now: str) -
         if sig:
             out.append(sig)
 
-    # If the trigger names no item, fall back to the freshest unclaimed digest
-    # entry — still grounded, still specific, just not the top of the list.
+    # If the trigger names no item, fall back to the freshest digest entries —
+    # still grounded, still specific, just not the top of the list.
+    #
+    # Digest entries are stored freshest-first, so this walks the head of the
+    # list in order. The previous version reversed the slice and broke after
+    # the first candidate, which meant it returned exactly one signal — the
+    # *third*-newest item — and left _rank nothing to choose between. Offering
+    # the top few as real candidates lets the ranking pick the best match.
     if not out:
-        for item in reversed(g.digest_items(category)[:3]):
+        for item in g.digest_items(category)[:3]:
             sig = _from_digest_item(item, merchant, "research",
                                     "new information for your category", category)
             if sig:
                 sig.relevance = 0.35
                 out.append(sig)
-            break
     return out
 
 

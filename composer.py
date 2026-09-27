@@ -419,7 +419,18 @@ def _customer_body(
     # Fold the attribution into the greeting. Keeping it as a separate sentence
     # gives "Hi Priya, This is X." — a capital mid-clause that reads wrong, and
     # a comma splice when the name is present.
-    opener = f"Hi {name} — this is {biz}" if name else f"This is {biz}"
+    #
+    # When the message is relayed by someone else — c_012 through a parent,
+    # c_013 through a son — a bare "Hi Mr. Sharma," greets the person holding
+    # the phone as if he were the customer. Naming the relationship is what
+    # makes the ask land, and it avoids saying the customer's own name twice
+    # in one sentence.
+    relation = g.mediator_relation(customer)
+    if relation:
+        opener = (f"Quick one for {name}, via {relation} — this is {biz}" if name
+                  else f"This is {biz} — please pass it on to them")
+    else:
+        opener = f"Hi {name} — this is {biz}" if name else f"This is {biz}"
 
     sentences: list[str] = []
 

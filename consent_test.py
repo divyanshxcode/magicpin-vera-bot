@@ -17,6 +17,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+import composer
+import grounding as g
 import server
 import tick
 from store import contexts, conversations, dispatch
@@ -131,6 +133,39 @@ def main() -> int:
     check("teardown clears the consent log",
           (c.post("/v1/teardown").status_code < 400
            and dispatch.consent_blocked == []))
+
+    print("\n--- relayed messages address the relay, not the customer ---")
+    mers = json.loads((D / "merchants_seed.json").read_text())["merchants"]
+    cat = json.loads((D / "categories/dentists.json").read_text())
+    t_reminder = {"id": "t", "kind": "recall_due", "scope": "customer",
+                   "customer_id": "c_x", "urgency": 3,
+                   "payload": {"service_due": "6_month_cleaning",
+                               "last_service_date": "2026-01-12",
+                               "due_date": "2026-07-12"}}
+    for label, channel, want in [
+            ("via_son", "whatsapp_via_son", "via your son"),
+            ("via_parent", "whatsapp_via_parent", "via your parent"),
+            ("direct", "whatsapp", None),
+            ("no channel recorded", "none_recorded", None),
+            ("absent", None, None)]:
+        cu = {"customer_id": "c_x", "identity": {"name": "Mr. Sharma"},
+              "preferences": {}}
+        if channel:
+            cu["preferences"]["channel"] = channel
+        b = composer.compose(cat, mers[0], t_reminder, cu, NOW)["body"]
+        check(f"channel={label} is detected correctly",
+              g.customer_is_via_mediary(cu) == (want is not None),
+              f"got {g.customer_is_via_mediary(cu)}")
+        if want:
+            check(f"channel={label} names the relay's relationship", want in b, b[:90])
+            check(f"channel={label} does not say the name twice",
+                  b.count("Mr. Sharma") <= 1, b[:90])
+        else:
+            check(f"channel={label} addresses the customer directly",
+                  " via your " not in b, b[:90])
+    check("a name containing 'via' is not mistaken for a relay",
+          not g.customer_is_via_mediary(
+              {"identity": {"name": "Ravi via phone"}, "preferences": {"channel": "whatsapp"}}))
 
     print("\n" + "=" * 60)
     print(f"  {len(_passed)}/{len(_passed) + len(_failed)} checks passed")

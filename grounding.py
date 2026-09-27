@@ -699,13 +699,52 @@ def customer_first_name(customer: dict) -> str:
     return parts[0]
 
 
+#: How the relay is described in the message. The channel says who is
+#: forwarding it, so the greeting can address that person by relationship
+#: rather than repeating the customer's own name back at them.
+RELAY_ROLE = {
+    "son": "your son",
+    "daughter": "your daughter",
+    "parent": "your parent",
+    "father": "your father",
+    "mother": "your mother",
+    "spouse": "your spouse",
+    "husband": "your husband",
+    "wife": "your wife",
+    "caregiver": "your caregiver",
+    "family": "a family member",
+    "guardian": "your guardian",
+}
+
+
+def mediator_relation(customer: dict) -> str:
+    """'your son' for a customer reached on whatsapp_via_son, else ''."""
+    channel = str(dig(customer, "preferences", "channel", default="") or "").lower()
+    if "_via_" not in channel:
+        return ""
+    who = channel.rsplit("_via_", 1)[-1].strip()
+    return RELAY_ROLE.get(who, "a family member") if who else ""
+
+
 def customer_is_via_mediary(customer: dict) -> bool:
-    """True when the message reaches the customer through someone else
-    (e.g. Mr. Sharma's son, a child's parent) and should address that person.
+    """True when the message reaches the customer through someone else.
+
+    `c_013` is "Mr. Sharma", reached on `whatsapp_via_son`; `c_012` is a child
+    reached on `whatsapp_via_parent`. Both are real records, and both are
+    someone the bot is writing *through*, not to.
+
+    The channel is the only honest signal. The previous version also matched
+    `"via " in name`, which fires on a customer merely named "Ravi via phone"
+    and says nothing at all about who is receiving the message — it read a
+    name as if it were a routing instruction.
     """
     channel = str(dig(customer, "preferences", "channel", default="") or "").lower()
-    name = str(dig(customer, "identity", "name", default="") or "").lower()
-    return "via_" in channel or "via " in name
+    if not channel or channel == "none_recorded":
+        return False
+    # "whatsapp_via_son", "whatsapp_via_parent" — a channel qualified by who
+    # is relaying. A plain "whatsapp" is direct and stays direct.
+    tail = channel.rsplit("_via_", 1)[-1]
+    return channel != tail and bool(tail)
 
 
 def consent_allows(customer: dict, scope_need: str) -> bool:

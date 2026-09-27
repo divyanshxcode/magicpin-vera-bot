@@ -80,6 +80,8 @@ class PromptBundle:
     model: str = ""
     temperature: float = 0.0
     max_tokens: int = 0
+    #: "none" | "low" | "" — disables hybrid-model reasoning where supported.
+    reasoning_effort: str = ""
 
 
 def _voice_block(category: dict) -> str:
@@ -150,7 +152,8 @@ def build_prompt(
     return PromptBundle(system=SYSTEM_PROMPT, user=user, facts=facts,
                         model=config.LLM_MODEL,
                         temperature=config.LLM_TEMPERATURE,
-                        max_tokens=config.LLM_MAX_TOKENS)
+                        max_tokens=config.LLM_MAX_TOKENS,
+                        reasoning_effort=config.REASONING_EFFORT)
 
 
 # --------------------------------------------------------------------------
@@ -261,7 +264,16 @@ def _extract_text(provider: str, data: dict) -> str:
     choices = data.get("choices") or []
     if not choices:
         return ""
-    return str((choices[0].get("message") or {}).get("content") or "")
+    msg = choices[0].get("message") or {}
+    # A hybrid reasoning model that exhausts its budget mid-thought returns
+    # content=None with finish_reason="length". There is no message to ship, so
+    # return "" and let the deterministic composer cover it.
+    content = msg.get("content")
+    if content:
+        return str(content)
+    # Gemini sometimes puts the answer under a different key; some reasoning
+    # models leave it in the refusal field.
+    return str(msg.get("refusal") or "")
 
 
 def _headers(provider: str, key: str) -> dict[str, str]:
@@ -298,6 +310,7 @@ def _cache_key(bundle: PromptBundle) -> str:
         bundle.model,
         str(bundle.temperature),
         str(bundle.max_tokens),
+        str(bundle.reasoning_effort),
         bundle.system,
         bundle.user,
     ])
@@ -365,6 +378,10 @@ def generate(bundle: PromptBundle) -> Optional[str]:
             "temperature": config.LLM_TEMPERATURE,
             "max_tokens": config.LLM_MAX_TOKENS,
         }
+        # Hybrid reasoning models accept this; plain ones ignore unknown keys,
+        # so it is safe to send whenever it is configured.
+        if bundle.reasoning_effort:
+            payload["reasoning_effort"] = bundle.reasoning_effort
 
     try:
         import httpx
@@ -616,6 +633,41 @@ def self_test() -> int:
               f"{before} -> {cache_size()}")
     finally:
         _c.LLM_PROVIDER, _c.LLM_API_KEY, _c.LLM_MODEL = was_prov, was_key, was_model
+
+    print("--- hybrid reasoning models ---")
+    # A reasoning model that exhausts its budget mid-thought returns
+    # content=None with finish_reason="length". Shipping that as a body would
+    # put the string "None" in front of a merchant, so it must extract to "".
+    check("null content extracts to empty (not the string 'None')",
+          _extract_text("openai", {"choices": [{"message": {"content": None},
+                                                "finish_reason": "length"}]}) == "",
+          repr(_extract_text("openai", {"choices": [{"message": {"content": None}}]})))
+    check("normal content still extracts",
+          _extract_text("openai", {"choices": [{"message": {"content": "hi"}}]}) == "hi")
+    check("missing choices is empty",
+          _extract_text("openai", {"choices": []}) == "")
+    check("missing message key is empty",
+          _extract_text("openai", {"choices": [{}]}) == "")
+    check("null content survives parse_body as empty",
+          parse_body(_extract_text("openai",
+                                   {"choices": [{"message": {"content": None}}]})) == "")
+
+    print("--- reasoning_effort plumbing ---")
+    import config as _c
+    was_effort = _c.REASONING_EFFORT
+    try:
+        _c.REASONING_EFFORT = "none"
+        b_eff = build_prompt(sig, cat, merchant)
+        check("bundle binds reasoning_effort", b_eff.reasoning_effort == "none",
+              repr(b_eff.reasoning_effort))
+        check("reasoning_effort is part of the cache key",
+              _cache_key(b_eff) != _cache_key(b1))
+        _c.REASONING_EFFORT = ""
+        b_noeff = build_prompt(sig, cat, merchant)
+        check("blank effort produces a different key than 'none'",
+              _cache_key(b_noeff) != _cache_key(b_eff))
+    finally:
+        _c.REASONING_EFFORT = was_effort
 
     print()
     print("ALL SEAM CHECKS PASSED" if ok else "SEAM CHECKS FAILED")

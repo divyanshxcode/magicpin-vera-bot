@@ -67,6 +67,17 @@ LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 700)
 TICK_DEADLINE_S = _env_float("TICK_DEADLINE_S", 20.0)
 
 
+#: Some hosted models are hybrid reasoning models: they emit a `reasoning`
+#: field before `content`, burning hundreds of tokens thinking about a
+#: two-sentence WhatsApp reply. Worse, if the token budget runs out mid-thought
+#: they return `content: null` and the message is lost.
+#:
+#: Set to "none" to disable reasoning, "low" to keep a token of it, or "" to
+#: use the provider default. Measured on inclusionai/ling-3.0-flash-fin:free:
+#: default 129 tokens, "low" 129, "none" 2 — and 1.76s down to 1.14s.
+REASONING_EFFORT = _env("LLM_REASONING_EFFORT", "")
+
+
 def llm_configured() -> bool:
     """True when a real LLM backend is available."""
     return bool(LLM_PROVIDER and LLM_API_KEY)

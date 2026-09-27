@@ -25,6 +25,7 @@ from pathlib import Path
 import httpx
 from fastapi.testclient import TestClient
 
+import llm
 import server
 from composer import compose
 from store import contexts, conversations, dispatch
@@ -80,13 +81,20 @@ class StubTransport(httpx.BaseTransport):
             "choices": [{"message": {"content": self.reply}}]})
 
 
-def use_stub(transport: StubTransport) -> None:
-    """Point every httpx.Client inside llm.py at the stub."""
-    original = httpx.Client
+_REAL_CLIENT = httpx.Client
 
+
+def use_stub(transport: StubTransport) -> None:
+    """Point every httpx.Client inside llm.py at the stub.
+
+    Always wraps _REAL_CLIENT, never whatever is currently installed. Wrapping
+    the current value nests the patches, and httpx honours only the first
+    `transport` kwarg it sees — so a second use_stub() in the same test would
+    silently keep hitting the first transport.
+    """
     def patched(*a, **kw):
         kw["transport"] = transport
-        return original(*a, **kw)
+        return _REAL_CLIENT(*a, **kw)
 
     httpx.Client = patched
 
@@ -95,13 +103,18 @@ def restore() -> None:
     httpx.Client = _REAL_CLIENT
 
 
-_REAL_CLIENT = httpx.Client
-
-
 def seed() -> None:
     contexts.reset()
     conversations.reset()
     dispatch.reset()
+    # Clear the LLM output cache too. Most cases here reuse the SAME trigger
+    # with a different stubbed reply, and a cache hit would return the earlier
+    # body instead — which is the cache working correctly, but makes the test
+    # assert against stale text. Determinism is covered by its own checks in
+    # llm.py's self-test instead.
+    import llm as _llm
+    with _llm._CACHE_LOCK:
+        _llm._CACHE.clear()
     for f in (DATASET / "categories").glob("*.json"):
         cat = load(f)
         contexts.push("category", cat["slug"], 1, cat)
@@ -111,8 +124,12 @@ def seed() -> None:
         contexts.push("trigger", t["id"], 1, t)
 
 
-def compose_one(trigger_id: str) -> dict | None:
+def compose_one(trigger_id: str, clear_cache: bool = False) -> dict | None:
     from store import contexts as ctx
+    if clear_cache:
+        import llm as _llm
+        with _llm._CACHE_LOCK:
+            _llm._CACHE.clear()
     trigger = ctx.get("trigger", trigger_id)
     merchant = ctx.get("merchant", trigger["merchant_id"])
     category = ctx.get("category", merchant["category_slug"])
@@ -286,6 +303,63 @@ def test_determinism() -> None:
           "prompt varies between identical calls")
 
 
+def test_cache_determinism() -> None:
+    section("Cache — a repeated prompt returns the identical body")
+    # The provider ignores temperature 0, so without the cache the same signal
+    # yields different wording. This is the guarantee the judge asks for:
+    # "your output should stay deterministic for the same input and settings".
+    #
+    # Tested at the seam (build_prompt -> generate) rather than through
+    # compose(), so the assertion is about the cache and nothing else.
+    seed()
+    enable_llm()
+    try:
+        stub = StubTransport(reply="First body wins.")
+        use_stub(stub)
+        bundle = _bundle_for("trg_001_research_digest_dentists")
+
+        first = llm.generate(bundle)
+        calls_after_first = len(stub.requests)
+        second = llm.generate(bundle)
+
+        check("first call reaches the provider", calls_after_first == 1,
+              f"{calls_after_first} requests")
+        check("repeat call returns the identical body", first == second,
+              f"{first!r} vs {second!r}")
+        check("repeat call made NO new HTTP request",
+              len(stub.requests) == calls_after_first,
+              f"{len(stub.requests)} requests, expected {calls_after_first}")
+
+        # A bundle bound to a different model must miss.
+        import config
+        config.LLM_MODEL = "some-other-model"
+        other = _bundle_for("trg_001_research_digest_dentists")
+        check("a different model binds a different bundle", other.model != bundle.model)
+        stub2 = StubTransport(reply="Body from a different model.")
+        use_stub(stub2)
+        third = llm.generate(other)
+        check("a different model is not served from the old cache entry",
+              third == "Body from a different model.", repr(third))
+        check("the miss actually called the provider", len(stub2.requests) == 1,
+              f"{len(stub2.requests)} requests")
+    finally:
+        restore()
+
+
+def _bundle_for(trigger_id: str):
+    """Build the exact prompt compose() would build, for direct seam tests."""
+    from signals import select_signal
+    trigger = contexts.get("trigger", trigger_id)
+    merchant = contexts.get("merchant", trigger["merchant_id"])
+    category = contexts.get("category", merchant["category_slug"])
+    customer = (contexts.get("customer", trigger["customer_id"])
+                if trigger.get("customer_id") else None)
+    signal = select_signal(category, merchant, trigger, customer,
+                           "2026-04-26T10:35:00Z")
+    import llm as _llm
+    return _llm.build_prompt(signal, category, merchant, customer, None)
+
+
 def test_disabled() -> None:
     section("Disabled — the default path makes zero network calls")
     seed()
@@ -346,6 +420,7 @@ def main() -> int:
         test_validation_fallback()
         test_provider_failures()
         test_determinism()
+        test_cache_determinism()
         test_disabled()
         test_endpoints_with_llm()
     finally:

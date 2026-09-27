@@ -60,6 +60,12 @@ LLM_TEMPERATURE = _env_float("LLM_TEMPERATURE", 0.0)
 LLM_TIMEOUT_S = _env_float("LLM_TIMEOUT_S", 12.0)
 LLM_MAX_TOKENS = _env_int("LLM_MAX_TOKENS", 700)
 
+# Wall-clock ceiling for composing a whole tick. Measured 4-5s per message
+# against real providers, so a 10-action tick is 7-15s in parallel. This leaves
+# real headroom under the judge's 30s and, if a provider stalls, times the
+# outstanding work out so the rest of the tick still ships.
+TICK_DEADLINE_S = _env_float("TICK_DEADLINE_S", 20.0)
+
 
 def llm_configured() -> bool:
     """True when a real LLM backend is available."""

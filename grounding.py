@@ -313,6 +313,25 @@ def offer_title(offer: Optional[dict]) -> str:
     return str(offer.get("title", "")).strip()
 
 
+def offer_price_text(offer: Optional[dict]) -> str:
+    """Render an offer's price the way a merchant would say it out loud.
+
+    "₹299" alone reads oddly in a sentence, so a discount becomes
+    "₹299 (was ₹499)" and a multi-off becomes "from ₹299". Returns "" when
+    there is no usable price, so callers can omit the clause entirely rather
+    than render a stray currency symbol.
+    """
+    if not isinstance(offer, dict):
+        return ""
+    price = offer.get("price")
+    if not isinstance(price, (int, float)) or price <= 0:
+        return ""
+    was = offer.get("original_price") or offer.get("compare_at")
+    if isinstance(was, (int, float)) and was > price:
+        return f"₹{price:,.0f} (was ₹{was:,.0f})"
+    return f"₹{price:,.0f}"
+
+
 def merchant_signals(merchant: dict) -> list[str]:
     sig = dig(merchant, "signals", default=[]) or []
     return [str(s) for s in sig if isinstance(s, str) and s.strip()]

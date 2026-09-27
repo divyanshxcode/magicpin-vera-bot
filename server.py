@@ -61,6 +61,30 @@ async def _json_body(request: Request) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------
+# GET /  — human-facing index
+# --------------------------------------------------------------------------
+# The judge only ever calls /v1/*, but anyone checking the deploy by opening
+# the base URL in a browser should see something other than a 404.
+
+
+@app.get("/")
+async def index() -> dict:
+    return {
+        "service": "Vera — magicpin AI Challenge",
+        "version": config.BOT_VERSION,
+        "status": "ok",
+        "endpoints": {
+            "GET  /v1/healthz": "liveness + loaded context counts",
+            "GET  /v1/metadata": "team identity",
+            "POST /v1/context": "versioned context push",
+            "POST /v1/tick": "proactive-send decision point",
+            "POST /v1/reply": "reply -> send | wait | end",
+            "POST /v1/teardown": "wipe state (optional)",
+        },
+    }
+
+
+# --------------------------------------------------------------------------
 # GET /v1/healthz
 # --------------------------------------------------------------------------
 

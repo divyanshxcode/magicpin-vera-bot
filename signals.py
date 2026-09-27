@@ -49,6 +49,11 @@ class Signal:
     #: A literal question to put to the merchant. Kept out of `headline` so
     #: the composer can render it as a question rather than a statement.
     question: str = ""
+    #: The merchant's own words, quoted verbatim from the trigger payload.
+    #: Checkable in a way a paraphrase is not: they wrote it. Carried
+    #: explicitly rather than pattern-matched out of prose, so `is_shippable`
+    #: can honour it without treating any stray quotation mark as a fact.
+    grounded_quote: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -436,7 +441,11 @@ def merchant_link_perf(merchant: dict, metric: str,
         if calls:
             parts.append(f"{g.fmt_int(calls)} calls in 30d")
     if not parts:
-        return f"your 30d {metric}"
+        # No peer figure and no performance numbers — usually a trigger whose
+        # MerchantContext never arrived. "your 30d calls" states nothing: it
+        # names a metric without a value, which reads as a truncated message.
+        # Better to say nothing here and let the headline carry the message.
+        return ""
     return " / ".join(parts)
 
 
@@ -769,6 +778,7 @@ def _planning_signal(merchant: dict, trigger: dict,
         merchant_link=artifact,
         cta=CTA_CONFIRM,
         lever="effort_externalization",
+        grounded_quote=last,
     )
 
 
@@ -807,6 +817,14 @@ def _curious_signal(merchant: dict, category: dict) -> Optional[Signal]:
         headline = f"{g.fmt_int(total)} customers came to you in the last year"
     elif offer:
         headline = f"{offer} is already running on your profile"
+
+    # Don't reach for a curious ask when there is nothing to be curious about.
+    # With an empty merchant record this produced a question with no fact
+    # anywhere behind it — the exact shape the specificity floor exists to
+    # reject, just arriving from a layer the floor never saw. The brief wants
+    # this lever used; it does not want it used when we know nothing.
+    if not headline:
+        return None
 
     return Signal(
         family="curious",
@@ -1332,6 +1350,112 @@ KIND_FAMILY = {
 }
 
 
+def payload_only_signal(merchant: dict, trigger: dict,
+                        category: Optional[dict] = None) -> Optional[Signal]:
+    """A message built from the trigger alone, for when context never arrived.
+
+    The last-resort path. Every other builder reads merchant or category
+    context, so a trigger referencing a profile the judge has not pushed yet
+    produces nothing at all — and the trigger's own payload is usually enough
+    to say something true and useful.
+
+    Three cases worth handling properly, because the payload carries real
+    substance in each:
+
+      active_planning_intent  the merchant's own question, verbatim
+      category_seasonal       per-product demand deltas with signs
+      gbp_unverified          the fix and the size of the prize
+
+    Anything else returns None. Silence is a legitimate answer and the brief
+    rewards restraint, so this must never manufacture a message out of a
+    payload with no checkable fact in it — hence the `_has_digits` guard.
+    """
+    payload = trigger.get("payload") or {}
+    if g.is_placeholder(payload):
+        return None
+    kind = g.trigger_kind(trigger)
+
+    if kind == "active_planning_intent":
+        topic = str(payload.get("intent_topic", "") or "").replace("_", " ").strip()
+        said = str(payload.get("merchant_last_message", "") or "").strip()
+        said = said.rstrip("?!. ") if len(said) > 90 else said
+        if not topic and not said:
+            return None
+        head = f"you asked about {topic}" if topic else "you had a question"
+        if said:
+            head += f' — you said: "{said}"'
+        return Signal(
+            family="planning",
+            headline=head,
+            why_now="you were mid-decision on this",
+            merchant_link=("say go and I'll draft the outline"
+                           if not category else ""),
+            cta=CTA_CONFIRM,
+            lever="effort_externalization",
+            grounded_quote=said,
+        )
+
+    if kind == "category_seasonal":
+        trends = [t for t in (payload.get("trends") or []) if isinstance(t, str)]
+        ups, downs = [], []
+        for raw in trends:
+            m = re.match(r"^(.+?)_([+-])_?(\d+)$", raw.strip())
+            if not m:
+                continue
+            label, sign, pct = m.group(1).replace("_", " "), m.group(2), int(m.group(3))
+            (ups if sign == "+" else downs).append(f"{label} {sign}{pct}%")
+        if not (ups or downs):
+            return None
+        bits = []
+        if ups:
+            bits.append("up: " + ", ".join(ups[:3]))
+        if downs:
+            bits.append("down: " + ", ".join(downs[:3]))
+        return Signal(
+            family="seasonal",
+            headline="demand is shifting with the season (" + "; ".join(bits) + ")",
+            why_now="this is the window to reorder against",
+            merchant_link="shelf action is worth it while the swing is live"
+                          if payload.get("shelf_action_recommended") else "",
+            cta=CTA_OPEN,
+            lever="loss_aversion",
+        )
+
+    if kind == "gbp_unverified":
+        uplift = payload.get("estimated_uplift_pct")
+        path = str(payload.get("verification_path", "") or "").replace("_", " ").strip()
+        tail = ""
+        if isinstance(uplift, (int, float)) and not isinstance(uplift, bool):
+            tail = f" — verified profiles get about {float(uplift) * 100:.0f}% more"
+        link = f"fixing it takes a {path}" if path else ""
+        return Signal(
+            family="gbp",
+            headline="your Google profile is still unverified" + tail,
+            why_now="this sits in front of every search that finds you",
+            merchant_link=link,
+            cta=CTA_OPEN,
+            lever="loss_aversion",
+        )
+
+    # Anything else: only speak if the payload itself carries a number or a
+    # date, and say it plainly rather than dressing it up.
+    blob = " ".join(str(v) for v in payload.values() if not isinstance(v, (dict, list)))
+    if not (_has_digits(blob) or _has_date(blob)):
+        return None
+    first = next((str(v).strip() for v in payload.values()
+                  if isinstance(v, (str, int, float)) and str(v).strip()), "")
+    if not first:
+        return None
+    return Signal(
+        family="update",
+        headline=first[:160],
+        why_now="this changed on your profile",
+        merchant_link="",
+        cta=CTA_OPEN,
+        lever="specificity",
+    )
+
+
 def is_shippable(signal: Signal) -> bool:
     """Is this signal specific enough to justify interrupting a merchant?
 
@@ -1371,6 +1495,14 @@ def is_shippable(signal: Signal) -> bool:
         return True
     if not (signal.headline or "").strip():
         return False
+    # The merchant's own words, quoted verbatim, are checkable in a way our
+    # reading of their business is not: they wrote it. A planning trigger whose
+    # merchant context never arrived has nothing else to offer, and dropping it
+    # over a missing digit throws away the one thing we do know. Carried as an
+    # explicit field rather than pattern-matched out of prose, so a stray
+    # quotation mark elsewhere cannot buy its way past this gate.
+    if (signal.grounded_quote or "").strip():
+        return True
     checkable = " ".join(filter(None, (signal.headline, signal.merchant_link,
                                        signal.citation)))
     return bool(_has_digits(checkable) or _has_date(checkable)
@@ -1457,9 +1589,24 @@ def select_signal(
     if allowed:
         filtered = [s for s in ranked if s.family in allowed]
         if filtered:
-            return filtered[0]
+            ranked = filtered
 
-    return ranked[0] if ranked else None
+    best = ranked[0] if ranked else None
+    if best is not None and is_shippable(best):
+        return best
+
+    # Either nothing survived, or the best one cannot be said anything
+    # checkable about. Both are the same situation from the merchant's side:
+    # we have a trigger and no usable angle on it. The trigger's own payload
+    # is the last place to look, and it usually carries the date or number
+    # that the missing context would have supplied.
+    fallback = payload_only_signal(merchant, trigger, category)
+    if fallback is not None and is_shippable(fallback):
+        return fallback
+    # Nothing shippable from either route. Silence is a real answer here and
+    # the brief rewards restraint, so return nothing rather than the best
+    # unusable signal.
+    return None
 
 
 def _fallback_signals(category: dict, merchant: dict, trigger: dict, now: str) -> list[Signal]:

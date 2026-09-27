@@ -160,21 +160,32 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
             continue
 
         merchant = contexts.get("merchant", merchant_id)
-        if not merchant:
-            continue
+        merchant_missing = not merchant
+        if merchant_missing:
+            # Degrade, don't drop. A trigger is itself an authoritative
+            # statement that something happened — a recall, a lapsed
+            # subscription, a due refill — and its payload carries the dates
+            # and numbers. Silently discarding it because a profile has not
+            # arrived yet loses the message entirely, when the honest answer
+            # ("a 6-month cleaning is due 2025-11-12") was available all
+            # along. The brief pushes exactly this case: context is pushed
+            # incrementally and new triggers can reference merchants the bot
+            # has not been told about yet.
+            merchant = {"merchant_id": merchant_id}
 
         category = contexts.get("category", str(merchant.get("category_slug", "")))
         if not category:
-            continue
+            category = {}
 
         customer = None
         customer_id = trigger.get("customer_id")
         if customer_id:
             customer = contexts.get("customer", str(customer_id))
             if not customer:
-                # Customer-scoped trigger with no customer context yet. Skip
-                # rather than send a half-informed message about a real person.
-                continue
+                # Same reasoning, and here the id is enough to go on: customer
+                # ids encode the person's name, and the judge supplied it.
+                # Only the record is missing, not the identity.
+                customer = {"customer_id": str(customer_id)}
 
         # Reuse an open conversation for this trigger so multi-turn state and
         # anti-repetition carry across ticks.

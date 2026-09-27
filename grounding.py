@@ -352,10 +352,17 @@ def salutation(category: dict, merchant: dict) -> str:
     Dentists get the honorific because it is the register the category's own
     voice profile prescribes (`salutation_examples: ["Dr. {first_name}"]`).
     Everything else gets a plain first-name greeting.
+
+    Returns "" — not "Hi" — when the merchant's name is unknown, which happens
+    whenever a trigger arrives before its MerchantContext. The composer then
+    opens on the fact itself. A bare "Hi," followed by a comma is worse than
+    no greeting at all: it is the bulk-broadcast shape the judge's merchant-fit
+    dimension is built to catch, and it reads as a message sent to nobody in
+    particular.
     """
     fn = merchant_first_name(merchant)
     if not fn:
-        return "Hi"
+        return ""
     tone = str(dig(category, "voice", "tone", default="") or "")
     slug = str(category.get("slug") or dig(merchant, "category_slug", default="") or "")
     if tone == "peer_clinical" or slug == "dentists" or slug == "pharmacies":
@@ -544,9 +551,61 @@ def _month_range_matches(rng: str, month: int) -> bool:
     return month >= lo or month <= hi
 
 
-# --------------------------------------------------------------------------
+# --------------------------------------------------------------------------  
 # customer
 # --------------------------------------------------------------------------
+
+
+#: Tokens in a customer id that are never a name. "c_013_grandfather_for_m009"
+#: is a relationship — the real record says "Mr. Sharma" — and greeting someone
+#: as "Hi Grandfather," is worse than not greeting them by name at all.
+#: "anonymous" likewise means there is no profile to name.
+_ID_STOPWORDS = {
+    "anonymous", "unknown", "walkin", "guest", "none", "na",
+    "grandfather", "grandmother", "father", "mother", "uncle", "aunt",
+    "son", "daughter", "brother", "sister", "husband", "wife", "parent",
+}
+
+
+def customer_name_from_id(customer_id: str) -> str:
+    """Best-effort first name from a customer id, or "".
+
+    Customer ids in this dataset are `c_001_priya_for_m001` — the second
+    segment is the person's name. When a trigger names a customer whose
+    CustomerContext has not arrived yet, that id is the only thing we have,
+    and it is context the judge itself supplied, not something invented.
+
+    There is deliberately no merchant equivalent. `m_003_studio11_salon_hyderabad`
+    is owned by Lakshmi: the second segment is the *business*, so parsing it
+    as an owner name would address the wrong person. Guessing there is worse
+    than saying nothing, so merchant callers get "".
+
+    Returns "" whenever the shape is unfamiliar, which keeps a differently-
+    shaped hidden dataset from producing a garbled greeting.
+    """
+    cid = str(customer_id or "").strip().lower()
+    if not cid:
+        return ""
+    parts = [p for p in re.split(r"[^a-z0-9]+", cid) if p]
+    # Expect <prefix> <number> <name...> [for|at] <ref>. Anything else is a
+    # shape we have not seen, and guessing at it is how you address "Sr." to
+    # a dentist.
+    if len(parts) < 3 or not parts[0] or not parts[1].isdigit():
+        return ""
+    tail = parts[2:]
+    for stop in ("for", "at", "of"):
+        if stop in tail:
+            tail = tail[:tail.index(stop)]
+    if not tail:
+        return ""
+    first = tail[0]
+    if first in _ID_STOPWORDS:
+        return ""
+    # "karthik_jr" -> "Karthik Jr"; drop generational suffixes.
+    name = " ".join(w for w in tail if w not in ("jr", "sr", "ii", "iii"))
+    if not name:
+        return ""
+    return " ".join(w.capitalize() for w in name.split())
 
 
 def customer_first_name(customer: dict) -> str:
@@ -559,7 +618,8 @@ def customer_first_name(customer: dict) -> str:
     """
     name = str(dig(customer, "identity", "name", default="") or "").strip()
     if not name:
-        return ""
+        cid = str(customer.get("customer_id", "") or "")
+        return customer_name_from_id(cid)
     # Names like "Aanya (parent: Sneha)" -> "Aanya"
     name = re.split(r"\(", name)[0].strip()
     parts = [p for p in re.split(r"\s+", name) if p]

@@ -15,7 +15,7 @@ Every fact that ends up in a message passes through here. Two reasons:
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Iterable, Optional
 
 # --------------------------------------------------------------------------
@@ -139,6 +139,34 @@ def parse_date(value: Any) -> Optional[date]:
             return parser(v)
         except (ValueError, TypeError):
             continue
+    return None
+
+
+def parse_moment(value: Any) -> Optional[datetime]:
+    """Parse to a full datetime, KEEPING the time component.
+
+    parse_date() deliberately returns a date: expiry and "days ago" are
+    day-granularity questions. Anything measured in minutes or hours must not
+    use it — two timestamps on the same date both collapse to midnight, so the
+    interval between them reads as zero. That is not a rounding detail, it
+    makes every same-day cooldown unreachable and silently mutes the bot.
+
+    Always returns a timezone-aware value so subtraction never mixes naive
+    and aware datetimes.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    v = value.strip().replace("Z", "+00:00")
+    for parser in (
+        lambda s: datetime.fromisoformat(s),
+        lambda s: datetime.fromisoformat(s[:10]),
+        lambda s: datetime.strptime(s[:10], "%Y-%m-%d"),
+    ):
+        try:
+            parsed = parser(v)
+        except (ValueError, TypeError):
+            continue
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
     return None
 
 

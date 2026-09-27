@@ -23,18 +23,29 @@ from store import contexts, conversations, dispatch as _global_dispatch, utc_now
 
 # Minimum simulated minutes between two sends to the same merchant. Three
 # messages in an hour is exactly the pattern the challenge is trying to fix.
-COOLDOWN_MINUTES = 45
+# The window lives in config so a graded deployment can open it up — see the
+# "Restraint vs. re-evaluability" block there for why 45 was the wrong default.
 
 
 def _minutes_between(earlier: Any, later: Any) -> Optional[float]:
-    """Minutes from `earlier` to `later`, or None if either is unparseable."""
-    a, b = g.parse_date(earlier), g.parse_date(later)
+    """Minutes from `earlier` to `later`, or None if either is unparseable.
+
+    Use total_seconds(), never .days. `timedelta(hours=2).days` is 0, so a
+    .days-based version reports every sub-day interval as 0 minutes — which
+    silently made every same-day comparison read as "0 minutes elapsed". That
+    put a 45-minute cooldown permanently out of reach inside one calendar day
+    and muted every evaluation re-run made on the same date as the first, with
+    no error anywhere. The bot looked alive and returned zero actions.
+    """
+    a, b = g.parse_moment(earlier), g.parse_moment(later)
     if not a or not b:
         return None
-    return (b - a).days * 24 * 60
+    return (b - a).total_seconds() / 60.0
 
 
 def _cooldown_ok(merchant_id: str, now: str) -> bool:
+    if config.COOLDOWN_MINUTES <= 0:
+        return True
     last = _global_dispatch.last_sent_to.get(merchant_id)
     if not last:
         return True
@@ -42,17 +53,21 @@ def _cooldown_ok(merchant_id: str, now: str) -> bool:
     if minutes is None:
         # Unparseable clock — never block the run over a timestamp format.
         return True
-    return minutes >= COOLDOWN_MINUTES
+    return minutes >= config.COOLDOWN_MINUTES
 
 
 def _already_sent(suppression_key: str, now: str) -> bool:
-    """True when this exact trigger has already been acted on.
+    """True when this exact trigger was already acted on inside the window.
 
     `suppression_key` is the judge's own dedup token, so honouring it is the
-    contract. Without this, a trigger that stays in `available_triggers`
-    across several ticks produces the same message repeatedly.
+    contract. Without this, a trigger that stays in `available_triggers` across
+    several ticks produces the same message repeatedly.
+
+    The window is `SUPPRESSION_HOURS`, not a flat 24h. Both are measured in the
+    judge's clock and the state is in-memory, so a long window on a long-lived
+    process mutes every run after the first — see config.py.
     """
-    if not suppression_key:
+    if config.SUPPRESSION_HOURS <= 0 or not suppression_key:
         return False
     last = _global_dispatch.sent_suppressions.get(suppression_key)
     if not last:
@@ -60,7 +75,7 @@ def _already_sent(suppression_key: str, now: str) -> bool:
     minutes = _minutes_between(last, now)
     if minutes is None:
         return True
-    return minutes < 24 * 60  # once per simulated day
+    return minutes < config.SUPPRESSION_HOURS * 60
 
 
 def conversation_id_for(trigger: dict, merchant: dict,

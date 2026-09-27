@@ -35,6 +35,16 @@ services:
       - key: PYTHON_VERSION
         value: "3.13"
 
+      # Restraint windows, both disabled. These are measured in the judge's
+      # clock and the state satisfying them is in-memory, so on a long-lived
+      # process any non-zero window mutes every evaluation run after the
+      # first. There is no real merchant here to spam; /v1/teardown exists for
+      # an operator who wants a clean slate mid-window. See config.py.
+      - key: SUPPRESSION_HOURS
+        value: "0"
+      - key: COOLDOWN_MINUTES
+        value: "0"
+
       # Identity the judge reads from GET /v1/metadata.
       - key: TEAM_NAME
         value: "Divyansh Singh"

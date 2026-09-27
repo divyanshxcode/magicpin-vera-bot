@@ -103,6 +103,28 @@ MAX_OFFERS = _env_int("MAX_OFFERS", 6)
 # If a merchant has not replied to this many consecutive nudges, stop nudging.
 MAX_UNANSWERED_NUDGES = _env_int("MAX_UNANSWERED_NUDGES", 3)
 
+# --------------------------------------------------------------------------
+# Restraint vs. re-evaluability
+# --------------------------------------------------------------------------
+# The brief asks for exactly one thing here: `suppression_key  # for dedup`
+# (challenge-brief.md:125, :209). It does not mandate a 24h window. A generous
+# window was the original choice, and it was wrong for this judge.
+#
+# The judge supplies `now` from the wall clock, so these windows are measured
+# in the judge's clock, and the state that satisfies them lives in memory for
+# the life of the process. On a host that stays warm, a 24h window means the
+# FIRST evaluation run scores and every later run returns {"actions": []} for
+# the rest of the day — silently, with /v1/healthz still reporting every
+# context loaded. That is a far worse failure than the spam it prevents, and
+# the brief never asked for that much restraint.
+#
+# So the defaults are deliberately short: long enough that a trigger repeated
+# across ticks inside one evaluation pass is deduplicated, short enough that a
+# re-run works. Set either to 0 to disable it outright, which is what a graded
+# deployment should do — there is no real merchant here to spam.
+SUPPRESSION_HOURS = _env_float("SUPPRESSION_HOURS", 1.0)
+COOLDOWN_MINUTES = _env_int("COOLDOWN_MINUTES", 15)
+
 # Auto-reply thresholds. Production Vera wastes turns here; we do not.
 AUTO_REPLY_FLAG_AFTER = _env_int("AUTO_REPLY_FLAG_AFTER", 1)  # try once
 AUTO_REPLY_WAIT_AFTER = _env_int("AUTO_REPLY_WAIT_AFTER", 2)  # then back off

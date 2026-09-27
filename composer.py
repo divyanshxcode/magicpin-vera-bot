@@ -450,35 +450,73 @@ def send_as_for(signal: Signal) -> str:
 import validate as _validate  # noqa: E402  (circular-import avoidance)
 
 
+def _recipient_for(signal: Signal, merchant: dict,
+                   customer: Optional[dict]) -> str:
+    """Who this message is for, and who is signing it.
+
+    A customer-facing message is addressed to the customer; a merchant-facing
+    one to the owner. Getting this wrong is not a style problem: checking a
+    customer message against the merchant's name made every such message look
+    like a greeting failure, and the model was left with no name to check at
+    all, which is how a refill reminder for a pharmacy went out addressed to a
+    dentist who was never part of the conversation.
+    """
+    if signal.customer_facing and customer:
+        return g.customer_first_name(customer)
+    return g.merchant_first_name(merchant)
+
+
+def _business_for(merchant: dict) -> str:
+    return str(g.dig(merchant, "identity", "name", default="") or "")
+
+
 def _body_via_llm(
     signal: Signal,
     category: dict,
     merchant: dict,
     customer: Optional[dict],
     sent_bodies: Optional[set],
+    cta_text: str = "",
 ) -> Optional[str]:
     """Ask the model to phrase this signal. None means "use the fallback".
 
-    Three layers of defence sit between the model and the wire:
+    Five layers of defence sit between the model and the wire:
 
       1. the prompt carries only facts already grounded in code, so there is
          nothing for it to hallucinate a number from
       2. parse_body() strips quotes, preambles and links
-      3. validate.py in compose() rejects taboo words, repeats and bad
+      3. every number in the reply must trace to those facts
+      4. the reply must open with the person it is actually for
+      5. validate.py in compose() rejects taboo words, repeats and bad
          length, with a deterministic retry behind it
+
+    Layers 3 and 4 discard the body rather than repair it. A message with one
+    number too many, or one that greets a stranger, is not a sentence that
+    needs editing — it is evidence that the model filled a gap, and the
+    deterministic composer renders the same signal correctly from code.
 
     The deterministic path is not a toy fallback — it is the guaranteed floor.
     The judge treats a 500 as a hard failure, so every failure mode here
     returns None and lets the service continue.
     """
     if not config.llm_configured():
+        # Counted, not silent. This is the state healthz most needs to be
+        # honest about: every message is being phrased by the deterministic
+        # composer, and nothing above this point would otherwise say so.
+        try:
+            import llm
+
+            llm._bump("no_provider")
+        except Exception:  # noqa: BLE001
+            pass
         return None
 
     try:
         import llm
 
         bundle = llm.build_prompt(signal, category, merchant, customer,
-                                  sorted(sent_bodies) if sent_bodies else None)
+                                  sorted(sent_bodies) if sent_bodies else None,
+                                  cta_text)
         raw = llm.generate(bundle)
     except Exception:  # noqa: BLE001 — a seam failure must never 500
         return None
@@ -495,7 +533,42 @@ def _body_via_llm(
         except Exception:  # noqa: BLE001
             pass
         return None
-    return raw.strip() or None
+
+    body = raw.strip()
+    if not body:
+        return None
+
+    # The grounding check runs on the model output only, not on the composed
+    # body. The deterministic composer builds its text out of the same Signal
+    # those facts were rendered from, so there is nothing for it to invent;
+    # the model is the only path by which a number can reach a merchant that
+    # no context field contains.
+    business = _business_for(merchant)
+    recipient = _recipient_for(signal, merchant, customer)
+    # Bodies already sent in this conversation are context the model was
+    # legitimately shown, so a number carried over from one is not invention.
+    prior = sorted(sent_bodies) if sent_bodies else []
+    stray = _validate.ungrounded_numbers(body, bundle.facts, prior)
+    problem = stray and f"number(s) not in the facts: {', '.join(stray)}"
+    if not problem:
+        why = _validate.opening_ok(body, recipient, business,
+                                   signal.customer_facing)
+        if why:
+            problem = why
+
+    if problem:
+        try:
+            import llm
+
+            llm._bump("rejected")
+            llm._bump("fallback")
+            # Numbers and name checks only — never the body itself.
+            print(f"        [llm] model body rejected: {problem}")
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    return body
 
 
 def compose(
@@ -522,11 +595,23 @@ def compose(
     if not is_shippable(signal):
         return None
 
-    body = _body_via_llm(signal, category, merchant, customer, sent_bodies)
+    # The CTA is resolved before the body, not after: the closing ask is part
+    # of the message, so the model is given the same sentence the deterministic
+    # composer would have used, and the grounding check has a source for the
+    # numbers inside it.
+    cta_kind, cta_text = build_cta(signal, merchant, category)
+
+    body = _body_via_llm(signal, category, merchant, customer, sent_bodies,
+                         cta_text)
     if body is None:
         body = compose_body(signal, category, merchant, customer)
 
-    result = _validate.validate(body, category, merchant, sent_bodies)
+    result = _validate.validate(
+        body, category, merchant, sent_bodies,
+        recipient=_recipient_for(signal, merchant, customer),
+        business=_business_for(merchant),
+        customer_facing=signal.customer_facing,
+    )
 
     if not result.ok and not result.cleaned_body:
         # The LLM produced something unusable. One deterministic retry is
@@ -535,13 +620,16 @@ def compose(
         if body is not None and body != compose_body(signal, category, merchant, customer):
             result = _validate.validate(
                 compose_body(signal, category, merchant, customer),
-                category, merchant, sent_bodies)
+                category, merchant, sent_bodies,
+                recipient=_recipient_for(signal, merchant, customer),
+                business=_business_for(merchant),
+                customer_facing=signal.customer_facing,
+            )
             if result.cleaned_body and result.ok:
                 body = None
         if not result.cleaned_body:
             return None
 
-    cta_kind, cta_text = build_cta(signal, merchant, category)
     if not cta_kind or cta_kind == CTA_NONE:
         cta_kind = signal.cta if cta_text else CTA_NONE
 

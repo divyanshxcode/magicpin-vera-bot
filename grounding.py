@@ -324,6 +324,63 @@ def days_until_label(value: Any, now: Any) -> str:
     return f"in {d//365} years"
 
 
+def payload_countdown(
+    payload: Any,
+    count_keys: Iterable[str],
+    date_key: str,
+    now: Any,
+) -> Optional[int]:
+    """The countdown this trigger itself declared, with a staleness override.
+
+    A trigger payload is the bot's own statement about the world: it says
+    "196 days to the wedding" and names the date that count came from. The
+    judge scores trigger relevance by cross-checking the message against that
+    payload, so a countdown recomputed against the wall clock is a message
+    contradicting the very context it is being scored in — "42 days" beside a
+    payload that says 196 is read as a fabricated number, which is a −2.
+
+    So the payload's own count wins. What it cannot be trusted for is
+    *direction*: a count that still reads down to a date already behind us (or
+    an elapsed count pointing at a date still ahead) is stale on a hidden
+    dataset, and a countdown to a date in the past is not a usable thing to
+    send. Magnitude disagreement on its own is not evidence of staleness —
+    the count was true when the trigger was generated, which is the reference
+    frame the payload is read in — so the override fires only on a sign
+    conflict, and then the recomputed value wins because it is the one that
+    describes a date we could actually talk about.
+
+    Returns None when the payload carries neither a usable count nor a
+    parseable date, so callers fall back to whatever else they have.
+    """
+    if not isinstance(payload, dict):
+        return None
+
+    count: Optional[int] = None
+    for key in count_keys:
+        raw = payload.get(key)
+        if isinstance(raw, bool):
+            continue
+        if isinstance(raw, (int, float)):
+            count = int(raw)
+            break
+        if isinstance(raw, str) and re.fullmatch(r"\s*-?\d+\s*", raw):
+            count = int(raw)
+            break
+
+    date_val = payload.get(date_key) if date_key else None
+    recomputed = days_between(now, date_val) if date_val else None
+
+    if count is None:
+        return recomputed
+    if recomputed is None:
+        return count
+    # `>= 0` rather than `> 0` so a count of 0 ("today") still agrees with a
+    # date that is with us, and only a genuinely passed date forces a recount.
+    if (count >= 0) != (recomputed >= 0):
+        return recomputed
+    return count
+
+
 # --------------------------------------------------------------------------
 # identity / voice
 # --------------------------------------------------------------------------

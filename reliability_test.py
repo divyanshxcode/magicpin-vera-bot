@@ -174,10 +174,30 @@ def main() -> int:
     check("healthz reports composition counters", "composition" in h)
     check("healthz leaks no message content",
           all(k in {"llm_ok", "fallback", "cached", "rate_limited", "retries",
-                    "provider_error", "timeout"}
+                    "provider_error", "timeout", "no_provider", "rejected"}
               for k in h.get("composition", {})),
           str(h.get("composition")))
     check("healthz still reports contexts_loaded", "contexts_loaded" in h)
+
+    # The counter that catches a whole run going unphrased by the model.
+    # Before this existed, an unconfigured provider produced zero counters
+    # while the bot happily emitted 25 messages — the least honest possible
+    # healthz: reporting nothing while quietly doing the thing you care about.
+    import composer
+
+    import signals as S
+
+    sig = S.Signal(family="perf_dip", headline="calls 50% down", why_now="this week",
+                   merchant_link="4 calls in 30d vs a 12 peer median")
+    llm.reset_stats()
+    real_prov, real_key = config.LLM_PROVIDER, config.LLM_API_KEY
+    config.LLM_PROVIDER, config.LLM_API_KEY = "", ""
+    try:
+        composer._body_via_llm(sig, {}, {"merchant_id": "m_x"}, None, "2026-01-01T00:00:00Z")
+    finally:
+        config.LLM_PROVIDER, config.LLM_API_KEY = real_prov, real_key
+    check("an unconfigured provider is counted, not silent",
+          llm.stats()["no_provider"] == 1, str(llm.stats()))
 
     print("\n" + "=" * 60)
     print(f"  {len(_passed)}/{len(_passed) + len(_failed)} checks passed")

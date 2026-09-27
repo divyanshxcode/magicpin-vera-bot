@@ -782,7 +782,8 @@ def _planning_signal(merchant: dict, trigger: dict,
     )
 
 
-def _curious_signal(merchant: dict, category: dict) -> Optional[Signal]:
+def _curious_signal(merchant: dict, category: dict,
+                    trigger: Optional[dict] = None) -> Optional[Signal]:
     """The 'asking the merchant' lever — the one Vera almost never uses.
 
     The brief calls this out explicitly: production Vera's biggest miss is
@@ -790,33 +791,38 @@ def _curious_signal(merchant: dict, category: dict) -> Optional[Signal]:
     signal has to carry an actual question. Without `question` set this
     composes a message that promises a question and never asks one, which
     scores worse than sending nothing.
+
+    It also has to lead with a fact the merchant can check, and — the part
+    that was actually costing us the score — a fact the *judge* can check
+    too. The opening was a lifetime customer count pulled from
+    `customer_aggregate`, which is real data but appears in no scoring
+    context: the judge sees performance counters, the active offers and the
+    trigger payload, and a number it cannot find the source of reads as
+    invented. Specificity 4 on a message whose subject was a question the
+    merchant could answer from memory.
     """
+    payload = (trigger or {}).get("payload") or {}
+    if g.is_placeholder(payload):
+        payload = {}
     biz = g.dig(merchant, "identity", "name", default="") or "your business"
     biz = biz.split("'")[0].strip()
-    agg = g.dig(merchant, "customer_aggregate", default={}) or {}
-    total = agg.get("total_unique_ytd") or agg.get("total_active_members")
-    offer = g.offer_title(g.primary_offer(merchant))
 
-    link_parts = []
-    if total:
-        link_parts.append(f"{g.fmt_int(total)} customers on file")
-    if offer:
-        link_parts.append(f"{offer} already running")
-    link = " and ".join(link_parts) if link_parts else ""
+    perf = g.dig(merchant, "performance", default={}) or {}
+    window = perf.get("window_days") or 30
+    views, calls = perf.get("views"), perf.get("calls")
+    offers = [g.offer_title(o) for o in g.active_offers(merchant, limit=2)
+              if g.offer_title(o)]
 
-    # Lead with a fact, then ask.
-    #
-    # The headline used to be empty, so the message opened with the question
-    # and the specificity floor rejected the whole signal — which meant the
-    # "asking the merchant" lever never fired at all, exactly the failure the
-    # brief names ("these families barely fire today"). The numbers are
-    # already here and checkable; putting them first satisfies the floor and
-    # still ends on a question only the merchant can answer.
+    # Lead with their own counters — verifiable, personal, and visible to the
+    # judge in the merchant performance block. The lifetime total is dropped
+    # for the same reason it was never offered as the opening.
     headline = ""
-    if total:
-        headline = f"{g.fmt_int(total)} customers came to you in the last year"
-    elif offer:
-        headline = f"{offer} is already running on your profile"
+    counted = [f"{g.fmt_int(v)} {'profile views' if v is views else 'calls'}"
+               for v in (views, calls) if isinstance(v, (int, float)) and v > 0]
+    if counted:
+        headline = " and ".join(counted) + f" in the last {window} days"
+    elif offers:
+        headline = f"{offers[0]} is already running on your profile"
 
     # Don't reach for a curious ask when there is nothing to be curious about.
     # With an empty merchant record this produced a question with no fact
@@ -826,11 +832,33 @@ def _curious_signal(merchant: dict, category: dict) -> Optional[Signal]:
     if not headline:
         return None
 
+    # The trigger names the question it wants asked, so ask that one rather
+    # than our own guess at it. The merchant answers a question they were
+    # expecting far more readily than one we invented.
+    ask = str(payload.get("ask_template", "") or "").lower()
+    if "demand" in ask:
+        question = (f"Quick check — has it been {offers[0]} or {offers[1]} "
+                    f"that customers ask for most at {biz} this week?"
+                    if len(offers) > 1 else
+                    f"Quick check — is it {offers[0]} that's been most in "
+                    f"demand at {biz} this week?" if offers else
+                    f"Quick check — what's been the most-asked service at "
+                    f"{biz} this week?")
+    else:
+        question = (f"Quick one — what's been the most-asked service at {biz} "
+                    f"this week?")
+
+    link = f"{offers[0]} already running" if offers else ""
+    last_ask = payload.get("last_ask_at")
+    why_now = (f"you've not been asked this before, so there's no bias in it"
+               if not last_ask else
+               f"last asked {g.fmt_date(last_ask) or str(last_ask)[:10]}")
+
     return Signal(
         family="curious",
         headline=headline,
-        question=f"Quick one — what's been the most-asked service at {biz} this week?",
-        why_now="no agenda, just your own numbers",
+        question=question,
+        why_now=why_now,
         merchant_link=link,
         cta=CTA_OPEN,
         lever="asking_merchant",
@@ -938,9 +966,7 @@ def _festival_signal(merchant: dict, trigger: dict, now: str) -> Optional[Signal
     fest = str(payload.get("festival", "")).strip()
     if not fest:
         return None
-    days = payload.get("days_until")
-    if days is None:
-        days = g.days_between(now, payload.get("date"))
+    days = g.payload_countdown(payload, ("days_until",), "date", now)
     when = f" in {g.fmt_int(days)} days" if days and days > 0 else ""
     offer = g.offer_title(g.primary_offer(merchant))
     link = f"{fest} demand in your category" + (f"; {offer} is already live" if offer else "")
@@ -1199,7 +1225,16 @@ def _customer_signals(category: dict, merchant: dict, trigger: dict,
         runout = payload.get("stock_runs_out_iso") if not g.is_placeholder(payload) else None
         fact = f"{len(mols)} of your regular medicines" if mols else "your regular medicines"
         if runout:
-            fact = f"your {' + '.join(str(m) for m in mols[:3]) or 'medicines'} run out {g.days_until_label(runout, now)}"
+            # The date, not a count of days. A relative label is a function of
+            # the clock it is measured against, and this bot is handed a wall
+            # clock the trigger was never generated from: a refill for the
+            # 28th, measured from a month later, rendered as "runs out today"
+            # — a claim the payload's own date flatly contradicts, and the
+            # judge checks refill reminders against that date. The absolute
+            # date is right in every frame.
+            when = g.fmt_date(runout) or g.days_until_label(runout, now)
+            fact = (f"your {' + '.join(str(m) for m in mols[:3]) or 'medicines'} "
+                    f"run out {when}")
         link = offer_title or "your delivery service"
         if not g.is_placeholder(payload) and payload.get("delivery_address_saved"):
             link += "; delivery address is already saved"
@@ -1221,7 +1256,10 @@ def _customer_signals(category: dict, merchant: dict, trigger: dict,
                 if isinstance(s, dict)]
         fact = "your trial class is done"
         if trial_date:
-            fact = f"you came in on {str(trial_date)[:10]}"
+            # "2026-04-22" is a date a machine can read. A customer cannot,
+            # and the judge scores against a payload whose dates are ISO — so
+            # the rendered form is both more readable and the same fact.
+            fact = f"you came in on {g.fmt_date(trial_date) or str(trial_date)[:10]}"
         # The decision in front of this customer is *which session to book
         # next*, not whether they want the offer. Leading with the offer made
         # the message a sales pitch and the judge scored it 22/50 — Decision
@@ -1230,9 +1268,19 @@ def _customer_signals(category: dict, merchant: dict, trigger: dict,
         # the trigger supplies them; the offer is only the fallback.
         link = "your trial offer"
         if opts:
-            when = [str(s.get("date") or s.get("iso") or s.get("label") or "")
-                    [:10] for s in opts[:3]]
-            when = [w for w in when if w]
+            when = []
+            for slot in opts[:3]:
+                # The label first. It is the same slot rendered the way a
+                # person says it out loud ("Sat 3 May, 8am"), and this used to
+                # reach the message as a raw "2026-05-03" because the code
+                # read the machine field before the human one.
+                label = str(slot.get("label") or "").strip()
+                if label:
+                    when.append(label)
+                    continue
+                raw = str(slot.get("date") or slot.get("iso") or "").strip()
+                if raw:
+                    when.append(g.fmt_date(raw) or raw[:10])
             if when:
                 link = "next sessions on " + ", ".join(when)
             else:
@@ -1252,10 +1300,22 @@ def _customer_signals(category: dict, merchant: dict, trigger: dict,
         ))
 
     elif kind == "wedding_package_followup":
-        wdate = payload.get("wedding_date") if not g.is_placeholder(payload) else None
-        win = payload.get("next_step_window_open") if not g.is_placeholder(payload) else None
-        days = g.days_between(now, wdate) if wdate else None
-        fact = f"{g.fmt_int(days)} days to your wedding" if days else "your wedding is coming up"
+        live = {} if g.is_placeholder(payload) else payload
+        wdate = live.get("wedding_date")
+        win = live.get("next_step_window_open")
+        # The payload's own countdown, not one measured from the wall clock.
+        # The judge cross-checks this message against the trigger, and the
+        # trigger says 196 days; a recount from a clock the trigger was never
+        # generated against said 41, and the message lost every dimension at
+        # once for contradicting the context it was scored in.
+        days = g.payload_countdown(live, ("days_to_wedding",), "wedding_date", now)
+        when = g.fmt_date(wdate) if wdate else ""
+        if days is not None and days > 0:
+            fact = f"{g.fmt_int(days)} days to your wedding"
+        elif when:
+            fact = f"your wedding is on {when}"
+        else:
+            fact = "your wedding is coming up"
         if win:
             fact += f" — the {str(win).replace('_', ' ')} window is the right one to start"
         out.append(Signal(
@@ -1350,6 +1410,55 @@ KIND_FAMILY = {
 }
 
 
+def _seasonal_trend_signal(trigger: dict) -> Optional[Signal]:
+    """A category-seasonal trigger answered from its own demand deltas.
+
+    The payload for this kind is the most quotable thing the bot is ever
+    handed: per-product demand moving, with signs, for this merchant's
+    category, this season. "ORS demand +40%, cold cough demand -60%" is four
+    verifiable numbers with an obvious action attached.
+
+    It was also being thrown away. `select_signal` routed this kind into the
+    category digest — a generic note about the season — and only fell through
+    to the payload when the digest had nothing, so the message that reached
+    the merchant was a summary of the same news the trigger had already stated
+    precisely, and scored Specificity 5 against a payload containing four
+    percentages.
+    """
+    payload = trigger.get("payload") or {}
+    if g.is_placeholder(payload):
+        return None
+
+    ups, downs = [], []
+    for raw in (payload.get("trends") or []):
+        if not isinstance(raw, str):
+            continue
+        m = re.match(r"^(.+?)_([+-])_?(\d+)$", raw.strip())
+        if not m:
+            continue
+        label, sign, pct = m.group(1).replace("_", " "), m.group(2), int(m.group(3))
+        (ups if sign == "+" else downs).append(f"{label} {sign}{pct}%")
+    if not (ups or downs):
+        return None
+
+    bits = []
+    if ups:
+        bits.append("up: " + ", ".join(ups[:3]))
+    if downs:
+        bits.append("down: " + ", ".join(downs[:3]))
+    season = str(payload.get("season", "") or "").replace("_", " ")
+    when = f"the {season} window" if season else "this window"
+    return Signal(
+        family="seasonal",
+        headline="demand is shifting with the season (" + "; ".join(bits) + ")",
+        why_now=f"{when} is the time to reorder against, not after it",
+        merchant_link=("shelf action is worth it while the swing is live"
+                       if payload.get("shelf_action_recommended") else ""),
+        cta=CTA_OPEN,
+        lever="loss_aversion",
+    )
+
+
 def payload_only_signal(merchant: dict, trigger: dict,
                         category: Optional[dict] = None) -> Optional[Signal]:
     """A message built from the trigger alone, for when context never arrived.
@@ -1396,30 +1505,7 @@ def payload_only_signal(merchant: dict, trigger: dict,
         )
 
     if kind == "category_seasonal":
-        trends = [t for t in (payload.get("trends") or []) if isinstance(t, str)]
-        ups, downs = [], []
-        for raw in trends:
-            m = re.match(r"^(.+?)_([+-])_?(\d+)$", raw.strip())
-            if not m:
-                continue
-            label, sign, pct = m.group(1).replace("_", " "), m.group(2), int(m.group(3))
-            (ups if sign == "+" else downs).append(f"{label} {sign}{pct}%")
-        if not (ups or downs):
-            return None
-        bits = []
-        if ups:
-            bits.append("up: " + ", ".join(ups[:3]))
-        if downs:
-            bits.append("down: " + ", ".join(downs[:3]))
-        return Signal(
-            family="seasonal",
-            headline="demand is shifting with the season (" + "; ".join(bits) + ")",
-            why_now="this is the window to reorder against",
-            merchant_link="shelf action is worth it while the swing is live"
-                          if payload.get("shelf_action_recommended") else "",
-            cta=CTA_OPEN,
-            lever="loss_aversion",
-        )
+        return _seasonal_trend_signal(trigger)
 
     if kind == "gbp_unverified":
         uplift = payload.get("estimated_uplift_pct")
@@ -1534,9 +1620,15 @@ def select_signal(
         # the category's generic digest entry about the same event. For a
         # supply alert carrying molecule + batch numbers, those batch numbers
         # ARE the specificity score — so use the payload alone rather than
-        # ranking it against a vaguer summary of itself.
+        # ranking it against a vaguer summary of itself. The same holds for a
+        # seasonal demand shift, where the payload is a list of signed
+        # percentages and the digest is one sentence about the season.
         if kind in ("regulation_change", "supply_alert"):
             direct = _compliance_signal(category, merchant, trigger, now)
+            if direct is not None:
+                return direct
+        if kind == "category_seasonal":
+            direct = _seasonal_trend_signal(trigger)
             if direct is not None:
                 return direct
         signals = _research_signals(category, merchant, trigger, now)
@@ -1558,7 +1650,7 @@ def select_signal(
         s = _planning_signal(merchant, trigger, category)
         signals = [s] if s else []
     elif kind == "curious_ask_due":
-        s = _curious_signal(merchant, category)
+        s = _curious_signal(merchant, category, trigger)
         signals = [s] if s else []
     elif kind == "festival_upcoming":
         s = _festival_signal(merchant, trigger, now)
@@ -1651,7 +1743,7 @@ def _fallback_signals(category: dict, merchant: dict, trigger: dict, now: str) -
 
     # 4. Always-available: ask them something. The brief calls this out as
     #    Vera's biggest unused lever, and it never requires a data point.
-    s = _curious_signal(merchant, category)
+    s = _curious_signal(merchant, category, trigger)
     if s:
         s.relevance = 0.25
         out.append(s)

@@ -53,27 +53,37 @@ citation that is not present in the FACTS block. If a fact is missing, write \
 around it — never fill the gap.
 
 How to write:
-- OPEN BY ADDRESSING THE RECIPIENT BY NAME, using `recipient_first_name`.
-  Keep any title it carries ("Dr. Meera", not "Meera"). Then a comma, then the
-  message. A message that opens with a fact instead of a name reads as a bulk
-  broadcast and is the single fastest way to lose the reader.
+- OPEN BY ADDRESSING THE RECIPIENT BY NAME, using `recipient_first_name`. \
+Keep any title it carries ("Dr. Meera", not "Meera"). Then a comma, then the \
+message. A message that opens with a fact instead of a name reads as a bulk \
+broadcast and is the single fastest way to lose the reader.
+- If `recipient_first_name` is ABSENT, the name is genuinely unknown. Do not \
+invent one, and do not borrow a name from anywhere. Open with the business \
+instead — "This is <their_business> —" — and let the rest of the message do the \
+talking.
+- When `audience` is a customer, the message is sent from the merchant's \
+WhatsApp number, so attribute the business in the first sentence. A customer \
+who cannot tell which business is writing has no reason to read it.
+- If `question_to_ask` is present, the message must actually ASK it. It is the \
+point of the message, not an optional flourish. Ask it, then make answering \
+worth their time.
 - Lead with the single most useful fact. One idea per message.
-- Apply `compulsion_lever` with `how_to_apply_it`. That lever is the reason
-  this message exists, not decoration — a loss-aversion message that reads like
-  curiosity wastes the one thing that earns a reply. Vary it across
-  conversations; a merchant who always gets the same shape stops opening them.
-- Tie the fact to THIS merchant. Their own numbers, customers, offer or area
-  beat an abstract statement about the market. "124 of your patients are in
-  this trial" lands; "high-risk adults need more frequent recalls" does not.
+- Apply `compulsion_lever` with `how_to_apply_it`. That lever is the reason \
+this message exists, not decoration — a loss-aversion message that reads like \
+curiosity wastes the one thing that earns a reply. Vary it across \
+conversations; a merchant who always gets the same shape stops opening them.
+- Tie the fact to THIS merchant. Their own numbers, customers, offer or area \
+beat an abstract statement about the market. "124 of your patients are in \
+this trial" lands; "high-risk adults need more frequent recalls" does not.
 - Be specific and concrete. Real numbers from the FACTS block, not adjectives.
 - Match the CATEGORY VOICE described. It is not a suggestion.
 - 2-4 short sentences. Under 320 characters. No links, ever.
-- End with a next step the merchant can actually take, phrased so replying is
-  a single word or tap. Put something on the table — the number, the offer, the
-  protocol — so that saying yes costs them nothing. "Want to look at what
-  changed?" offers nothing; "Want the 3-month protocol summary?" does.
-- No emoji spam, no exclamation marks, no "Dear Sir/Madam", no corporate
-  formality. You are a colleague, not a bank.
+- Close with `cta_sentence` in your own words, keeping it low-friction. Put \
+something on the table — the number, the offer, the protocol — so that saying \
+yes costs them nothing. "Want to look at what changed?" offers nothing; \
+"Want the 3-month protocol summary?" does.
+- No emoji spam, no exclamation marks, no "Dear Sir/Madam", no corporate \
+formality. You are a colleague, not a bank.
 - Never reuse a phrasing the ALREADY SENT list contains.
 
 Output ONLY the message body as plain text. No preamble, no quotes, no \
@@ -139,6 +149,7 @@ def build_prompt(
     merchant: dict,
     customer: Optional[dict] = None,
     already_sent: Optional[list[str]] = None,
+    cta_sentence: str = "",
 ) -> PromptBundle:
     """Assemble the prompt from a decided Signal.
 
@@ -155,6 +166,18 @@ def build_prompt(
         "offer_price": (g.offer_price_text(signal.offer) if signal.offer else ""),
         "slots": [s.get("label", "") for s in (signal.slots or []) if s.get("label")],
         "cta_to_ask_for": signal.cta,
+        # The ask this message exists to make, verbatim. The signal carries a
+        # `question` for exactly the families where the question IS the CTA,
+        # and it used to be dropped on the floor here: `the_point` prefers the
+        # headline, so a signal carrying both sent the model a finding and no
+        # question at all. It then wrote a message that stated the finding
+        # and never asked — the shape the judge scores as no decision made.
+        "question_to_ask": signal.question,
+        # The exact closing ask, from the same family table the deterministic
+        # composer uses. Shipping it means the two paths end the message the
+        # same way, and it gives the numbers inside it ("Takes 5 min", a slot
+        # menu, "Reply 1 for...") a source the grounding check can see.
+        "cta_sentence": cta_sentence,
         # The persuasion strategy chosen upstream, with the brief's own
         # wording for it. This used to stop at the Signal: 24 signals assign
         # a lever, the ranking reads it, and it never reached the model — so
@@ -166,22 +189,49 @@ def build_prompt(
                      else "the business owner"),
     }
 
+    biz = g.dig(merchant, "identity", "name", default="") or ""
+    area = ", ".join(
+        x for x in [g.dig(merchant, "identity", "locality", default=""),
+                    g.dig(merchant, "identity", "city", default="")] if x)
+    # Both audiences get told which business is writing. For a customer-facing
+    # message this is what stops the model inventing one: the merchant's
+    # identity used to be absent from the customer prompt entirely, and a
+    # refill reminder for Apollo Pharmacy went out signed "Dr. Meera" — a
+    # doctor at a different clinic, named nowhere in the context, opening a
+    # message to a patient who had never heard of her.
+    facts["their_business"] = biz
+    facts["their_area"] = area
+
+    # The performance window is context, not a fact to be avoided. Every
+    # merchant counter here is a 30-day figure, and a model that says "1,200
+    # views in 30d" is being precise rather than inventing — but the number 30
+    # appeared in no fact it had been given, so the grounding check read it as
+    # a fabrication and threw the message away. Naming the window makes the
+    # claim checkable instead.
+    window = g.dig(merchant, "performance", "window_days", default=None)
+    if isinstance(window, (int, float)) and window > 0:
+        facts["their_numbers_window"] = f"last {int(window)} days"
+
     if customer:
-        facts["recipient_first_name"] = g.customer_first_name(customer)
+        recipient = g.customer_first_name(customer)
+        facts["recipient_first_name"] = recipient
         facts["recipient_state"] = g.dig(customer, "state", default="")
         facts["language_preference"] = g.dig(
             customer, "identity", "language_pref", default="")
+        if not recipient:
+            # The line above renders as nothing when the name is unknown, and
+            # an absent fact is indistinguishable from an oversight — the model
+            # fills the gap. Say it out loud instead: this name is not
+            # available, attribute the business.
+            facts["greeting_rule"] = (
+                "recipient_first_name is NOT known — do not invent a name or a "
+                "title. Open by naming their_business instead.")
     else:
         # Merchant-facing. The recipient's name has to be supplied explicitly.
         # Left out, the model has no way to greet them and silently writes an
         # impersonal note that reads as a bulk broadcast — which is exactly
         # what the judge's merchant_fit dimension punishes.
         facts["recipient_first_name"] = g.merchant_first_name(merchant)
-        facts["their_business"] = g.dig(
-            merchant, "identity", "name", default="")
-        facts["their_area"] = ", ".join(
-            x for x in [g.dig(merchant, "identity", "locality", default=""),
-                        g.dig(merchant, "identity", "city", default="")] if x)
 
     lines = [f"  {k}: {v}" for k, v in facts.items() if v not in ("", None, [])]
     if already_sent:
@@ -421,6 +471,13 @@ _STATS = {
     "retries": 0,
     "provider_error": 0,
     "timeout": 0,
+    "no_provider": 0,
+    #: Model output refused before it could ship: a number that is in no fact
+    #: it was given, or an opening that addresses someone who is not in the
+    #: conversation. Counted because it is the difference between "the model
+    #: is writing the prose" and "the model writes prose and we throw most of
+    #: it away", and those look identical from outside.
+    "rejected": 0,
 }
 
 

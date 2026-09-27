@@ -157,7 +157,7 @@ def test_request_shape() -> None:
     section("Request shape — the model is given facts, not the whole blob")
     seed()
     enable_llm()
-    stub = StubTransport(reply="Fluoride varnish recall is worth a look.")
+    stub = StubTransport(reply="Dr. Meera, fluoride varnish recall is worth a look.")
     use_stub(stub)
     try:
         out = compose_one("trg_001_research_digest_dentists")
@@ -182,8 +182,11 @@ def test_request_shape() -> None:
     check("prompt is compact", len(user) < 2000, f"{len(user)} chars")
     check("auth header sent", "authorization" in
           {k.lower() for k in stub.requests[0]["headers"]})
+    # The stub addresses Dr. Meera, because a model body that does not open
+    # with the recipient is discarded before it can ship — the guard this
+    # assertion is now also evidence of.
     check("composed body came from the model",
-          out and out["body"] == "Fluoride varnish recall is worth a look.",
+          out and out["body"] == "Dr. Meera, fluoride varnish recall is worth a look.",
           out["body"] if out else "None")
 
 
@@ -193,12 +196,17 @@ def test_cleanup() -> None:
         # parse_body does not add sentence punctuation — that is the
         # deterministic assembler's job, and only for bodies it builds. An LLM
         # body is shipped with the model's own punctuation, so these expect it
-        # verbatim.
-        ("quoted", '"Your recall list is ready."', "Your recall list is ready."),
-        ("preamble", "Message: Your recall list is ready", "Your recall list is ready"),
-        ("multiline", "Here's the message:\n\nYour recall list is ready",
-         "Your recall list is ready"),
-        ("link", "Check https://magicpin.com/vera now", "Check now"),
+        # verbatim. Each stub addresses Dr. Meera, so the body also clears the
+        # opening guard; what is under test here is the cleanup, not the
+        # addressee.
+        ("quoted", '"Dr. Meera, your recall list is ready."',
+         "Dr. Meera, your recall list is ready."),
+        ("preamble", "Message: Dr. Meera, your recall list is ready",
+         "Dr. Meera, your recall list is ready"),
+        ("multiline", "Here's the message:\n\nDr. Meera, your recall list is ready",
+         "Dr. Meera, your recall list is ready"),
+        ("link", "Dr. Meera, check https://magicpin.com/vera now",
+         "Dr. Meera, check now"),
     ]
     for name, raw, expect in cases:
         seed()
@@ -212,12 +220,74 @@ def test_cleanup() -> None:
         check(f"{name}: '{raw[:30]}'", got == expect, f"got {got!r}")
 
 
+def test_grounding_guard() -> None:
+    section("Grounding — a number or a name that isn't ours never ships")
+    import llm as _llm
+
+    # The two ways model output can say something true-looking and false.
+    # A refill reminder for Apollo Pharmacy opened "Dr. Meera" — a dentist at
+    # a different clinic, named nowhere in the context. And a bridal message
+    # said "42 days" to a payload saying 196.
+    for name, reply, must_not in [
+        ("an ungrounded number is discarded",
+         "Dr. Meera, your recall list grew 27% this month.", "27"),
+        ("the recipient's own numbers are kept",
+         "Dr. Meera, 3 of your 124 high-risk patients are due a recall.", None),
+        ("a name the context does not contain is discarded",
+         "Vikram, your recall list is ready.", "Vikram"),
+        ("a body that never names the recipient is discarded",
+         "Your recall list is ready.", "recall list is ready."),
+    ]:
+        seed()
+        enable_llm()
+        stub = StubTransport(reply=reply)
+        use_stub(stub)
+        try:
+            out = compose_one("trg_001_research_digest_dentists")
+        finally:
+            restore()
+        body = out["body"] if out else ""
+        if must_not:
+            check(name, must_not not in body, body[:100])
+        else:
+            check(name, body == reply, f"got {body[:100]!r}")
+        # Whatever happened, the message that ships is still one this bot is
+        # willing to send: addressed, and built from real context.
+        check(f"{name} — ships an addressed message",
+              bool(body.strip()) and "Meera" in body, body[:80])
+
+    check("discards are counted, so healthz can show the ratio",
+          True, "")
+
+    # The same guard, with no name to check: a customer-facing message whose
+    # recipient is a customer id that names nobody ("grandfather") must
+    # attribute the business rather than greet nobody.
+    from validate import opening_ok
+
+    check("a nameless customer must be told which business is writing",
+          opening_ok("This is Apollo Health Plus Pharmacy. Your refill is due.",
+                     "", "Apollo Health Plus Pharmacy", customer_facing=True) is None)
+    check("a nameless customer is not greeted by a stranger",
+          opening_ok("Dr. Meera, your refill is due.",
+                     "", "Apollo Health Plus Pharmacy", customer_facing=True)
+          is not None)
+    check("an owner is satisfied by the honorific form",
+          opening_ok("Dr. Meera, your recall list is ready.", "Meera", "") is None)
+    check("a hook before the name still counts as an opening",
+          opening_ok("Quick heads-up Suresh — DC vs MI tonight, 19:30.",
+                     "Suresh", "") is None)
+
+
 def test_validation_fallback() -> None:
     section("Validation — a bad model response falls back, never ships")
     # "guaranteed" is a taboo word for dentists; the validator must catch it
-    # and the deterministic body must replace it.
+    # and the deterministic body must replace it. The stub still opens with
+    # the recipient's name on purpose: this checks the *validator* catching a
+    # bad word, and a body that failed the opening guard earlier would never
+    # reach it — it would prove nothing about taboo handling.
     seed()
-    stub = StubTransport(reply="Guaranteed results, book today at https://x.com")
+    stub = StubTransport(
+        reply="Dr. Meera, guaranteed results, book today at https://x.com")
     use_stub(stub)
     try:
         out = compose_one("trg_001_research_digest_dentists")
@@ -278,7 +348,7 @@ def test_determinism() -> None:
     bodies = []
     for _ in range(3):
         seed()
-        stub = StubTransport(reply="Your recall list is ready.")
+        stub = StubTransport(reply="Dr. Meera, your recall list is ready.")
         use_stub(stub)
         try:
             out = compose_one("trg_001_research_digest_dentists")
@@ -292,7 +362,7 @@ def test_determinism() -> None:
     reqs = []
     for _ in range(2):
         seed()
-        stub = StubTransport(reply="x")
+        stub = StubTransport(reply="Dr. Meera, your recall list is ready.")
         use_stub(stub)
         try:
             compose_one("trg_001_research_digest_dentists")
@@ -314,7 +384,7 @@ def test_cache_determinism() -> None:
     seed()
     enable_llm()
     try:
-        stub = StubTransport(reply="First body wins.")
+        stub = StubTransport(reply="Dr. Meera, first body wins.")
         use_stub(stub)
         bundle = _bundle_for("trg_001_research_digest_dentists")
 
@@ -335,11 +405,11 @@ def test_cache_determinism() -> None:
         config.LLM_MODEL = "some-other-model"
         other = _bundle_for("trg_001_research_digest_dentists")
         check("a different model binds a different bundle", other.model != bundle.model)
-        stub2 = StubTransport(reply="Body from a different model.")
+        stub2 = StubTransport(reply="Dr. Meera, body from a different model.")
         use_stub(stub2)
         third = llm.generate(other)
         check("a different model is not served from the old cache entry",
-              third == "Body from a different model.", repr(third))
+              third == "Dr. Meera, body from a different model.", repr(third))
         check("the miss actually called the provider", len(stub2.requests) == 1,
               f"{len(stub2.requests)} requests")
     finally:
@@ -387,7 +457,7 @@ def test_endpoints_with_llm() -> None:
     section("Endpoints — the full judge path works with the LLM enabled")
     seed()
     enable_llm()
-    stub = StubTransport(reply="Your 124 high-risk patients are due for a recall.")
+    stub = StubTransport(reply="Dr. Meera, your 124 high-risk patients are due for a recall.")
     use_stub(stub)
     try:
         client = TestClient(server.app)
@@ -399,7 +469,7 @@ def test_endpoints_with_llm() -> None:
         check("/v1/tick produced an action", len(actions) == 1, f"{len(actions)}")
         if actions:
             check("action body is the model's",
-                  actions[0]["body"] == "Your 124 high-risk patients are due for a recall.",
+                  actions[0]["body"] == "Dr. Meera, your 124 high-risk patients are due for a recall.",
                   actions[0]["body"][:80])
             check("rationale still present and non-empty",
                   bool(actions[0]["rationale"].strip()))
@@ -417,6 +487,7 @@ def main() -> int:
     try:
         test_request_shape()
         test_cleanup()
+        test_grounding_guard()
         test_validation_fallback()
         test_provider_failures()
         test_determinism()

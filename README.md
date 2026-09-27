@@ -110,13 +110,29 @@ the bot quotes the new numbers and never the stale ones.
 
 ## Deployment
 
-Railway, via `railway.toml` (single replica, healthcheck on `/v1/healthz`).
-Set these as service variables — never commit them:
+**Live:** https://magicpin-vera-bot-hmqb.onrender.com
+
+Render, via `render.yaml`. Identity comes from that file; only the key is set
+in the dashboard:
 
 ```
 TEAM_NAME, TEAM_MEMBERS, CONTACT_EMAIL, BOT_VERSION
-LLM_PROVIDER, LLM_API_KEY, LLM_MODEL    # optional; blank = deterministic path
+LLM_PROVIDER, LLM_API_KEY, LLM_MODEL    # LLM_API_KEY is the only secret
 ```
 
+Verified against the deployed service with `verify_live.py` (12/12) and scored
+**39/50** by the official judge simulator (`run_judge_live.py`), 10/10 messages
+scored with no judge-side failures.
+
+Two things that will bite if forgotten:
+
+- **`PYTHON_VERSION=3.13` is required.** Render defaults to 3.14, where
+  `pydantic-core` 2.27.2 has no prebuilt wheel and pip falls back to a Rust
+  build that fails on Render's read-only cargo registry.
+- **Free tier sleeps after 15 minutes idle**, and a cold start takes 30–50s —
+  longer than the judge's 30s per-request budget. Keep the service warm during
+  a judging window.
+
 Single replica is deliberate: conversation state is in-memory, so a second
-replica would hold a different view of the same merchant.
+replica would hold a different view of the same merchant. `railway.toml` is
+kept so that platform still works.

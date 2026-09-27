@@ -58,6 +58,10 @@ How to write:
   message. A message that opens with a fact instead of a name reads as a bulk
   broadcast and is the single fastest way to lose the reader.
 - Lead with the single most useful fact. One idea per message.
+- Apply `compulsion_lever` with `how_to_apply_it`. That lever is the reason
+  this message exists, not decoration — a loss-aversion message that reads like
+  curiosity wastes the one thing that earns a reply. Vary it across
+  conversations; a merchant who always gets the same shape stops opening them.
 - Tie the fact to THIS merchant. Their own numbers, customers, offer or area
   beat an abstract statement about the market. "124 of your patients are in
   this trial" lands; "high-risk adults need more frequent recalls" does not.
@@ -112,6 +116,23 @@ def _fact_line(label: str, value: Any) -> str:
     return f"  {label}: {text}" if text else ""
 
 
+#: How to apply each compulsion lever, worded from the challenge brief's own
+#: list (section 10) rather than invented here. The brief is explicit that
+#: "a diversified conversation portfolio wins" and that social proof and
+#: asking-the-merchant "barely fire" in production — so the mapping is
+#: deliberate, not decorative.
+_LEVER_GUIDANCE = {
+    "specificity": "Anchor on a number, date or source they can check. No adjectives.",
+    "loss_aversion": "Name what they are losing or what closes: 'before this window shuts'.",
+    "social_proof": "Show that others like them did this: peers in the same category or locality.",
+    "effort_externalization": "Do the work first, then ask for a one-word go-ahead.",
+    "curiosity": "Open a gap worth closing: 'want to see which ones?'",
+    "reciprocity": "Lead with what you noticed on their behalf — a favour, not a pitch.",
+    "asking_merchant": "Ask them something only they can answer, and make it easy.",
+    "urgency": "Say plainly how little time there is, without manufacturing panic.",
+}
+
+
 def build_prompt(
     signal: Signal,
     category: dict,
@@ -134,6 +155,13 @@ def build_prompt(
         "offer_price": (g.offer_price_text(signal.offer) if signal.offer else ""),
         "slots": [s.get("label", "") for s in (signal.slots or []) if s.get("label")],
         "cta_to_ask_for": signal.cta,
+        # The persuasion strategy chosen upstream, with the brief's own
+        # wording for it. This used to stop at the Signal: 24 signals assign
+        # a lever, the ranking reads it, and it never reached the model — so
+        # every message came out in the same generic register and the
+        # engagement plan was computed and thrown away.
+        "compulsion_lever": signal.lever,
+        "how_to_apply_it": _LEVER_GUIDANCE.get(signal.lever, ""),
         "audience": ("a customer of this business" if signal.customer_facing
                      else "the business owner"),
     }

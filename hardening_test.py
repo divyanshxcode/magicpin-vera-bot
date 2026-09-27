@@ -224,6 +224,11 @@ def test_determinism() -> None:
     # Signal. The only merchant-scoped signal it should reject is the
     # question-opening one; everything else must survive, or the floor is
     # eating real messages.
+    # The floor used to reject exactly one seed signal — the question-opening
+    # curious-ask, whose empty headline meant the merchant got a question
+    # where they should have got a finding. That signal now leads with the
+    # merchant's own numbers and asks second, so it clears the floor and the
+    # "asking the merchant" lever actually fires. Nothing should be rejected.
     from store import contexts as _ctx
     rejected = []
     for tid in tids:
@@ -235,9 +240,17 @@ def test_determinism() -> None:
         sig = _sig.select_signal(cat, m, trig, None, "2026-04-26T10:35:00Z")
         if sig is not None and not _sig.is_shippable(sig):
             rejected.append(tid)
-    check("on the seed data the floor rejects only the question-opening signal",
-          rejected == ["trg_008_curious_ask_studio11"],
-          f"rejected {rejected}")
+    check("every merchant-scoped seed signal now clears the specificity floor",
+          rejected == [], f"still rejected {rejected}")
+    # And the lever it was carrying must survive the change, or the brief's
+    # "asking the merchant barely fires" complaint is back.
+    _cur = _sig._curious_signal(
+        _ctx.get("merchant", "m_001_drmeera_dentist_delhi") or {},
+        _ctx.get("category", "dentists") or {})
+    check("the asking-the-merchant lever still fires",
+          _cur is not None and _cur.lever == "asking_merchant"
+          and bool(_cur.question) and bool(_cur.headline),
+          "curious signal lost its question, its headline, or its lever")
 
     # A qualifier in the topic changes what a useful answer must be. Asked
     # about a *kids* programme, matching the word "yoga" to an adult
@@ -256,6 +269,46 @@ def test_determinism() -> None:
           _sig._planning_artifact(restaurants, {}, "corporate_bulk_thali_package"))
     check("an unqualified topic still finds a topical artifact",
           bool(_sig._planning_artifact(gyms, {}, "strength_training")))
+
+    section("Compulsion levers — the brief's diversification requirement")
+    import llm as _llm
+    _meera = _c2.get("merchant", "m_001_drmeera_dentist_delhi") or {}
+    # The lever used to be computed on all 24 signals, read by the ranking,
+    # and never sent to the model — so every message came out in the same
+    # register and the engagement plan was thrown away.
+    _sig_m = _sig._milestone_signal(
+        _meera, {"payload": {"metric": "review_count", "value_now": 145,
+                             "milestone_value": 150}}, _c2.get("category", "dentists"))
+    _bundle = _llm.build_prompt(_sig_m, _c2.get("category", "dentists") or {},
+                                _meera, None, None)
+    check("the chosen lever reaches the model",
+          "compulsion_lever" in _bundle.user and _sig_m.lever in _bundle.user,
+          "lever missing from the prompt")
+    check("the model is told how to apply the lever",
+          "how_to_apply_it" in _bundle.user)
+    check("every lever we can assign has written guidance",
+          all(v.strip() for v in _llm._LEVER_GUIDANCE.values()))
+
+    # Social proof has to be earned. Claiming it for a merchant who is behind
+    # their peers is the kind of spin that reads as spin.
+    _proof = _sig.social_proof_link(_meera, _c2.get("category", "dentists") or {})
+    check("a merchant ahead of peers gets a real comparison",
+          bool(_proof) and "%" in _proof, f"got {_proof!r}")
+    check("the comparison states the peer figure it is claiming",
+          bool(_proof) and "category median" in _proof, f"got {_proof!r}")
+    # Zero every metric she leads on, not just calls — the helper is allowed
+    # to cite whichever metric the merchant is genuinely ahead on.
+    _behind = dict(_meera)
+    _behind["performance"] = {**_meera.get("performance", {}),
+                              "views": 0, "calls": 0, "ctr": 0.0,
+                              "directions": 0, "leads": 0}
+    _behind["customer_aggregate"] = {**_meera.get("customer_aggregate", {}),
+                                     "retention_6mo_pct": 0.0}
+    check("a merchant behind their peers gets no social proof at all",
+          _sig.social_proof_link(_behind, _c2.get("category", "dentists") or {}) == "",
+          "claimed a peer comparison for a merchant who leads on nothing")
+    check("social proof is not claimed without a category to compare against",
+          _sig.social_proof_link(_meera, None) == "")
 
     section("Determinism — no wall-clock leakage")
     # A body built from datetime.now() would differ between runs on the same

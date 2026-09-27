@@ -371,13 +371,18 @@ def _perf_signals(merchant: dict, trigger: dict, now: str,
         fact = f"{metric} {g.fmt_delta_pct(delta)}"
         if payload.get("likely_driver") and not g.is_placeholder(payload):
             fact += f", likely from your {str(payload['likely_driver']).replace('_', ' ')}"
+        # A rise that still leaves the merchant ahead of their peers is social
+        # proof, not just a number going up — and that is the lever the brief
+        # says production Vera barely fires. Only claimed when the comparison
+        # is actually earned; otherwise it stays neutral.
+        proof = social_proof_link(merchant, category, metric)
         out.append(Signal(
             family="perf_spike",
             headline=fact,
             why_now="this moved in the last 7 days",
-            merchant_link=merchant_link_perf(merchant, metric, category, "up"),
+            merchant_link=proof or merchant_link_perf(merchant, metric, category, "up"),
             cta=CTA_OPEN,
-            lever="curiosity",
+            lever="social_proof" if proof else "curiosity",
         ))
     return out
 
@@ -789,9 +794,23 @@ def _curious_signal(merchant: dict, category: dict) -> Optional[Signal]:
         link_parts.append(f"{offer} already running")
     link = " and ".join(link_parts) if link_parts else ""
 
+    # Lead with a fact, then ask.
+    #
+    # The headline used to be empty, so the message opened with the question
+    # and the specificity floor rejected the whole signal — which meant the
+    # "asking the merchant" lever never fired at all, exactly the failure the
+    # brief names ("these families barely fire today"). The numbers are
+    # already here and checkable; putting them first satisfies the floor and
+    # still ends on a question only the merchant can answer.
+    headline = ""
+    if total:
+        headline = f"{g.fmt_int(total)} customers came to you in the last year"
+    elif offer:
+        headline = f"{offer} is already running on your profile"
+
     return Signal(
         family="curious",
-        headline="",
+        headline=headline,
         question=f"Quick one — what's been the most-asked service at {biz} this week?",
         why_now="no agenda, just your own numbers",
         merchant_link=link,
@@ -815,6 +834,73 @@ def _seasonal_signals(category: dict, merchant: dict, now: str) -> list[Signal]:
             lever="curiosity",
         ))
     return out
+
+
+def social_proof_link(merchant: dict, category: Optional[dict],
+                      metric: str = "") -> str:
+    """A peer comparison that flatters the merchant, or "" if it isn't true.
+
+    The brief names social proof as one of the two levers production Vera
+    "barely fires", and gives the shape: "3 dentists in your locality did Y
+    this month". That has to be earned. A merchant ahead of the category
+    median genuinely has peers to point at; one behind does not, and dressing
+    a shortfall as social proof is the kind of thing that reads as spin.
+
+    So this only speaks when the merchant is materially above a peer figure,
+    and it names the comparison explicitly rather than implying one.
+    """
+    if not category:
+        return ""
+    perf = g.dig(merchant, "performance", default={}) or {}
+    agg = g.dig(merchant, "customer_aggregate", default={}) or {}
+
+    def own(metric: str) -> Any:
+        # A merchant's own figures are split across two blocks: the 30d
+        # counters live in `performance`, retention in `customer_aggregate`.
+        # Checking both keeps this working on a dataset that ships either
+        # shape, and costs nothing when a metric is absent — peer_gap
+        # returns None and the metric is simply skipped.
+        v = perf.get(metric)
+        return agg.get(metric) if v is None else v
+
+    best: Optional[tuple[str, float, str]] = None
+    for m in (metric, "rating", "review_count", "retention_6mo_pct",
+              "calls", "views", "ctr", "directions"):
+        if not m:
+            continue
+        value = own(m)
+        peer, label = g.peer_stat(category, m)
+        gap = g.peer_gap(value, peer)
+        # peer_gap returns a fraction, not a percentage: 0.5 means 50% ahead.
+        # Comparing it against 15 silently discarded every metric, because
+        # 0.5 <= 15.
+        if gap is None or gap <= 0.15:
+            continue
+        cand = (m, gap, label)
+        if best is None or cand[1] > best[1]:
+            best = cand
+    if best is None:
+        return ""
+    m, gap, label = best
+    value = own(m)
+    peer_value = g.peer_stat(category, m)[0]
+    if m == "ctr":
+        # CTR is a fraction (0.021) on both sides, and reads as an acronym.
+        mine = f"{float(value) * 100:.1f}% CTR"
+        theirs = f"{float(peer_value) * 100:.1f}%"
+    elif m in ("rating", "review_count"):
+        mine = f"{g.fmt_int(value)} reviews" if m == "review_count" else f"{float(value):.1f}"
+        theirs = (f"{g.fmt_int(peer_value)} reviews" if m == "review_count"
+                  else f"{float(peer_value):.1f}")
+    elif m == "retention_6mo_pct":
+        mine, theirs = f"{float(value) * 100:.0f}%", f"{float(peer_value) * 100:.0f}%"
+    else:
+        pretty = _metric_label(m)
+        mine, theirs = f"{g.fmt_int(value)} {pretty}", f"{g.fmt_int(peer_value)} {pretty}"
+    # `label` is deliberately not repeated here: `mine`/`theirs` already name
+    # the metric, and "the 12-calls calls category median" says it twice.
+    return (f"your {mine} sits {abs(gap) * 100:.0f}% above the category "
+            f"median of {theirs} — peers are behind you")
 
 
 def _seasonal_link(category: dict, merchant: dict, now: str) -> str:
@@ -915,11 +1001,16 @@ def _milestone_signal(merchant: dict, trigger: dict,
             remaining = None
         if remaining is not None and 0 < remaining <= 10:
             fact += f" — {g.fmt_int(remaining)} short of {g.fmt_int(target)}"
+    # Prefer an earned peer comparison when this merchant is actually ahead —
+    # that is what social proof is, and it is the other lever the brief says
+    # production Vera barely fires. Falls back to the neutral phrasing when
+    # the merchant is level or behind, because spin reads as spin.
+    proof = social_proof_link(merchant, category, "review_count")
     return Signal(
         family="milestone",
         headline=fact,
         why_now="milestones are what local customers filter on",
-        merchant_link=merchant_link_perf(merchant, "calls", category),
+        merchant_link=proof or merchant_link_perf(merchant, "calls", category),
         cta=CTA_OPEN,
         lever="social_proof",
     )

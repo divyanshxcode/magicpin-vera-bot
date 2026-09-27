@@ -70,12 +70,15 @@ def voice_for(category: dict) -> Voice:
 # --------------------------------------------------------------------------
 # `language_pref` values in the dataset: "hi-en mix", "hi", "english", "te-en
 # mix", "kn-en mix", "ta-en mix". For a mix preference we keep the structure
-# English (technical terms stay readable) but thread a little Hindi through,
-# the way production Vera actually writes and the way the 50/50 Case Study 2
-# anchor does it: "Apke liye 2 slots ready hain: Wed 5 Nov, 6pm ya Thu…"
+# English (technical terms stay readable) but thread a little of the reader's
+# own language through, the way production Vera actually writes and the way
+# the 50/50 Case Study 2 anchor does it: "Apke liye 2 slots ready hain: Wed 5
+# Nov, 6pm ya Thu…"
 #
 # A bad code-mix reads worse than none, so the phrases are few, fixed, and
-# placed where they read naturally — never appended as a dangling suffix.
+# placed where they read naturally — never appended as a dangling suffix. And
+# they are per-language: `kn-en mix` is a Kannada reader, and handing them the
+# Hindi line below is the single loudest way to ignore who they are.
 
 MIX_SLOTS = "Aapke liye {n} slots ready hain"
 MIX_SLOT_ONE = "Ek slot ready hai"
@@ -83,25 +86,81 @@ MIX_OFFER = "{offer} chal raha hai"
 MIX_REFILL = "Aapki {n} dawaiyaan khatam ho rahi hain"
 MIX_REMINDER = "Yeh ek reminder hai"
 
+#: Per-language overrides for the four that ship in the dataset. English
+#: carries the sentence structure, so these are short fragments that read as
+#: borrowed rather than as a translation — the register a real code-mixed
+#: message has. Only `slots` and `reminder` are translated: the offer title
+#: and drug names stay in English, which is exactly how these are written in
+#: practice, and translating a molecule name would be a fabrication.
+MIX_PHRASES: dict[str, dict[str, str]] = {
+    "kn": {"slots": "Nimmu {n} slots ready", "slot_one": "Oku slot ready",
+           "reminder": "Ee oru reminder", "running": "chaludukte"},
+    "ta": {"slots": "Ungaluku {n} slots ready", "slot_one": "Oru slot ready",
+           "reminder": "Idhu oru reminder", "running": "nadakkum"},
+    "te": {"slots": "Mekapaki {n} slots ready", "slot_one": "Oka slot ready",
+           "reminder": "Edi oru reminder", "running": "chalundi"},
+}
+
 
 def apply_language(body: str, lang: str, family: str, category: dict) -> str:
-    """Light-touch code-mix. Never translates technical or legal vocabulary."""
-    if lang != "mix" or not body:
+    """Light-touch code-mix. Never translates technical or legal vocabulary.
+
+    The per-language work happens at the point of composition, in
+    `mix_phrase` calls that know which fragment they are writing — mixing a
+    finished sentence here would mean pattern-matching it afterwards, and a
+    regex that guesses where a language starts is worse than not mixing at
+    all. So this stays a seam: it decides whether the reader wants a mix at
+    all, and leaves the wording to the composer.
+    """
+    if not body or not str(lang or "").startswith("mix"):
         return body
     return body
 
 
-def mix_phrase(kind: str, **kw) -> str:
-    """A natural Hindi-English fragment for `hi-en mix` recipients."""
+def mix_phrase(kind: str, lang: str = "mix", **kw) -> str:
+    """A code-mixed fragment in the reader's own base language.
+
+    Hindi is the default because it is the most common `*-en mix` in the
+    dataset and the one the case-study anchor was written in. A base language
+    with no translation falls back to the English sentence rather than to
+    another language's words — silence reads as neutral, Hindi-in-a-Kannada
+    message reads as a wrong recipient.
+    """
+    base = str(lang or "").split("-")[-1] if str(lang or "").startswith("mix") else "hi"
+    # A base language we have no phrase for gets the English lead-in, never
+    # another language's words. Falling back to Hindi here would hand a Malayalam
+    # reader Hindi and call it honouring their preference — the failure this
+    # whole change exists to remove. A bare "mix" (no base recorded) still
+    # resolves to Hindi, which is the case-study register and the common case.
+    if base == "hi":
+        table = {}          # the module-level Hindi defaults, used below
+    else:
+        table = MIX_PHRASES.get(base, {})
+
     if kind == "slots":
         n = kw.get("n", 2)
-        return MIX_SLOT_ONE if n == 1 else MIX_SLOTS.format(n=n)
+        if not table:
+            # No phrase for this base language. The caller has an English
+            # lead-in it will use instead — so this must be empty, not Hindi.
+            # Falling back to Hindi here is the exact bug this change removes.
+            return MIX_SLOTS.format(n=n) if base == "hi" else ""
+        if n == 1:
+            return table.get("slot_one", "")
+        return table.get("slots", "").format(n=n)
     if kind == "offer":
-        return MIX_OFFER.format(offer=kw.get("offer", ""))
+        # Offer titles and drug names stay in English in every language here —
+        # that is how they are written in practice, and translating a molecule
+        # name would be a fabrication. Only the "is running" verb is borrowed.
+        verb = table.get("running", "chal raha hai") if table else "is running"
+        if base != "hi" and not table:
+            return f"{kw.get('offer', '')} is running"
+        return f"{kw.get('offer', '')} {verb}"
     if kind == "refill":
+        if base != "hi":
+            return ""
         return MIX_REFILL.format(n=kw.get("n", "aapki"))
     if kind == "reminder":
-        return MIX_REMINDER
+        return MIX_REMINDER if base == "hi" else table.get("reminder", "")
     return ""
 
 
@@ -371,16 +430,23 @@ def _customer_body(
     offer = signal.offer or g.primary_offer(merchant)
     offer_title = g.offer_title(offer)
     if offer_title:
-        sentences.append(mix_phrase("offer", offer=offer_title)
-                         if lang == "mix" else f"{offer_title} is running")
+        sentences.append(mix_phrase("offer", lang=lang, offer=offer_title)
+                         if lang.startswith("mix") else f"{offer_title} is running")
 
     # Slots, if the trigger gave us any.
     if signal.slots:
         labels = [str(s.get("label", "")).strip() for s in signal.slots if s.get("label")]
         labels = [l for l in labels if l][:2]
         if labels:
-            if lang == "mix":
-                sentences.append(mix_phrase("slots", n=len(labels)))
+            if lang.startswith("mix"):
+                # The slot times themselves stay in English/latin digits — that
+                # is how these are actually written — and only the lead-in is
+                # borrowed, which is the register the case-study anchor uses.
+                fragment = mix_phrase("slots", lang=lang, n=len(labels))
+                lead = f"{fragment}: " if fragment else ""
+                sentences.append(
+                    f"{lead}{labels[0]}"
+                    + (f", or {labels[1]}" if len(labels) == 2 else ""))
             else:
                 lead = ("Two slots open" if len(labels) == 2 else "One slot open")
                 sentences.append(f"{lead}: {labels[0]}"

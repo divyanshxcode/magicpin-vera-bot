@@ -427,20 +427,32 @@ def salutation(category: dict, merchant: dict) -> str:
     return f"Hi {fn}"
 
 
-def language_of(entity: dict) -> str:
-    """Normalise a language preference to one of: en | hi | mix.
+#: Base languages that ship with an "-en mix" preference in the dataset. A
+#: code-mix preference is "speak some of my language inside the English
+#: structure", so which language is not a detail — it is the request.
+_MIX_BASES = {"hi", "kn", "ta", "te", "ml", "mr", "bn", "gu", "pa", "ur"}
 
-    `hi-en mix`, `hi` and `en` all appear in the dataset; anything unrecognised
-    falls back to English, which is the documented default.
+
+def language_of(entity: dict) -> str:
+    """Normalise a language preference to one of: en | hi | mix-<lang>.
+
+    The dataset ships `hi-en mix`, `kn-en mix`, `ta-en mix` and `te-en mix`
+    alongside `hi` and `english`. Collapsing every "*-en mix" to a bare `mix`
+    meant a Kannada speaker was handed Hindi fragments — the one thing a
+    language preference is supposed to prevent — so the base language is kept
+    as a suffix and `mix_phrase` can pick the right one. Anything with no
+    recognised base stays plain `mix`, and anything unrecognised falls back to
+    English, which is the documented default.
     """
     pref = ""
     if isinstance(entity, dict):
         pref = (dig(entity, "identity", "language_pref", default="")
                 or dig(entity, "voice", "code_mix", default="")
                 or "")
-    pref = str(pref).lower()
+    pref = str(pref).lower().strip()
     if "mix" in pref or "-" in pref:
-        return "mix"
+        base = pref.split("-")[0].strip()
+        return f"mix-{base}" if base in _MIX_BASES else "mix"
     if pref.startswith("hi") or pref == "hindi":
         return "hi"
     if pref.startswith("en") or pref == "english":

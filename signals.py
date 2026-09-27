@@ -523,6 +523,61 @@ def _renewal_signal(merchant: dict, trigger: dict, now: str,
     )
 
 
+def category_worth_saying(category: dict) -> str:
+    """The most current, most specific thing in the category pack, or "".
+
+    Shared by every signal that would otherwise be reaching out with no
+    reason. The dormancy message is the clearest case: it fired at 30/50 with
+    Category Fit 5/10 because its whole case was "no pressure, just one thing
+    worth knowing" — which is an admission that there is nothing. Leading with
+    something the category pack actually ships fixes both the fit and the
+    "why now" question at once.
+
+    Ordered most-specific first: a live seasonal beat (it is *now*), then a
+    trend signal with a number attached, then a review theme, then the
+    patient-content library. Nothing is invented; a pack that ships none of
+    these returns "" and the caller falls back to its own facts.
+    """
+    if not category:
+        return ""
+
+    for beat in g.dig(category, "seasonal_beats", default=[]) or []:
+        if not isinstance(beat, dict):
+            continue
+        note = str(beat.get("note", "") or "").strip()
+        span = str(beat.get("month_range", "") or "").strip()
+        if note:
+            return f"{note}{f' ({span})' if span else ''}"
+
+    for trend in g.dig(category, "trend_signals", default=[]) or []:
+        if not isinstance(trend, dict):
+            continue
+        query = str(trend.get("query", "") or "").strip()
+        delta = trend.get("delta_yoy")
+        if query and isinstance(delta, (int, float)) and not isinstance(delta, bool):
+            return f'"{query}" searches in {g.dig(category, "slug", default="your area")} ' \
+                   f"are up {abs(float(delta)) * 100:.0f}% year on year"
+
+    for theme in g.dig(category, "review_themes", default=[]) or []:
+        if not isinstance(theme, dict):
+            continue
+        label = str(theme.get("theme", "") or "").strip()
+        if label:
+            n = theme.get("count")
+            tail = f" ({g.fmt_int(n)} mentions recently)" if n else ""
+            return f"{label} keeps coming up in {str(g.dig(category, 'display_name', default='your category') or 'your category').lower()} reviews{tail}"
+
+    for item in g.dig(category, "patient_content_library", default=[]) or []:
+        if isinstance(item, dict):
+            title = str(item.get("title", "") or "").strip()
+            if title:
+                return f'"{title}" is already written and waiting'
+        elif isinstance(item, str) and item.strip():
+            return f'"{item.strip()}" is already written and waiting'
+
+    return ""
+
+
 def _planning_artifact(category: dict, merchant: dict, topic: str) -> str:
     """A concrete thing Vera can hand over, grounded in the category pack.
 
@@ -788,10 +843,19 @@ def _dormant_signal(merchant: dict, trigger: dict, now: str,
         days = int(re.sub(r"\D", "", str(days)) or 0) or None
     if not days:
         return None
+    # A "we haven't spoken in a while" message has no case on its own, and the
+    # judge said so — 30/50, Category Fit 5. Lead with something the category
+    # is actually doing right now, so the check-in has a reason. The elapsed
+    # time stays, but as context rather than as the whole message.
+    fresh = category_worth_saying(category)
+    fact = f"it's been {g.fmt_int(days)} days since we last spoke"
+    if fresh:
+        fact = f"{fresh} — and it's been {g.fmt_int(days)} days since we last spoke"
     return Signal(
         family="dormant",
-        headline=f"it's been {g.fmt_int(days)} days since we last spoke",
-        why_now="no pressure — just one thing worth knowing",
+        headline=fact,
+        why_now=("no pressure — one thing worth knowing while it's current"
+                 if fresh else "no pressure — just one thing worth knowing"),
         merchant_link=merchant_link_perf(merchant, "views", category),
         cta=CTA_OPEN,
         lever="curiosity",
@@ -951,20 +1015,39 @@ def _customer_signals(category: dict, merchant: dict, trigger: dict,
         ))
 
     elif kind == "trial_followup":
-        trial_date = payload.get("trial_date") if not g.is_placeholder(payload) else None
-        opts = (payload.get("next_session_options") or []) if not g.is_placeholder(payload) else []
+        payload = payload if not g.is_placeholder(payload) else {}
+        trial_date = payload.get("trial_date")
+        opts = [s for s in (payload.get("next_session_options") or [])
+                if isinstance(s, dict)]
         fact = "your trial class is done"
         if trial_date:
             fact = f"you came in on {str(trial_date)[:10]}"
+        # The decision in front of this customer is *which session to book
+        # next*, not whether they want the offer. Leading with the offer made
+        # the message a sales pitch and the judge scored it 22/50 — Decision
+        # Quality 3, because it named no action. The dated slots are the
+        # checkable, actionable part, so they go in the merchant link whenever
+        # the trigger supplies them; the offer is only the fallback.
+        link = "your trial offer"
+        if opts:
+            when = [str(s.get("date") or s.get("iso") or s.get("label") or "")
+                    [:10] for s in opts[:3]]
+            when = [w for w in when if w]
+            if when:
+                link = "next sessions on " + ", ".join(when)
+            else:
+                link = f"{len(opts)} next sessions are open"
+        elif offer_title:
+            link = offer_title
         out.append(Signal(
             family="trial",
             headline=fact,
             why_now="the decision is easier right after the first class",
-            merchant_link=offer_title or "your trial offer",
+            merchant_link=link,
             cta=CTA_SLOTS if opts else CTA_OPEN,
             lever="reciprocity",
             customer_facing=True,
-            slots=[s for s in opts if isinstance(s, dict)],
+            slots=opts,
             offer=offer,
         ))
 
@@ -1065,6 +1148,51 @@ KIND_FAMILY = {
     "curious_ask_due": {"curious"},
     "active_planning_intent": {"planning"},
 }
+
+
+def is_shippable(signal: Signal) -> bool:
+    """Is this signal specific enough to justify interrupting a merchant?
+
+    The brief puts it plainly: "Specificity wins — anchor on a verifiable fact
+    the merchant can check." `_specificity` has always fed the ranking, but
+    ranking only decides what to send FIRST. With one action per merchant per
+    tick that made the floor unreachable, and raising the per-merchant cap let
+    weak signals through: a 20-message run scored 36 against a 14-message
+    run's 38, and the difference was messages like "quick one — what's been the
+    most-asked service?" (27/50, Specificity 4) that open with a question and
+    state no fact at all.
+
+    Two conditions, both necessary:
+
+      1. The headline is non-empty. That is what the message opens with, so an
+         empty one means the merchant gets a question where they should get a
+         finding. The curious-ask signal had a perfectly good fact sitting in
+         `merchant_link` ("1,150 customers on file and Haircut @ ₹99") and
+         still scored 27, because the fact never made it into the opening.
+
+      2. Something checkable exists somewhere in the signal — a digit, a date,
+         or a citation, in the headline or the merchant link. A topic is not
+         enough: "you asked about kids yoga summer camp" carries no fact on
+         its own, and the artifact beside it ("Yoga + Strength Combo @
+         ₹1,499/month") is what makes the message worth sending.
+
+    Scoring the two conditions separately matters. Scoring only the headline
+    dropped messages the judge had given 42/50; scoring the whole signal as one
+    blob dropped nothing, because a long merchant link picks up the length
+    bonus that `_specificity` awards to a well-formed short fact.
+
+    Customer-scoped signals are exempt: a recall to a named patient about a
+    dated slot is specific by construction, and its grounding lives in the
+    customer record rather than in these fields.
+    """
+    if signal.customer_facing:
+        return True
+    if not (signal.headline or "").strip():
+        return False
+    checkable = " ".join(filter(None, (signal.headline, signal.merchant_link,
+                                       signal.citation)))
+    return bool(_has_digits(checkable) or _has_date(checkable)
+                or (signal.citation or "").strip())
 
 
 def select_signal(

@@ -501,10 +501,15 @@ def compose(
     Returns None when there is genuinely nothing worth saying — the judge
     explicitly rewards restraint, and a bad message is worse than silence.
     """
-    from signals import select_signal
+    from signals import is_shippable, select_signal
 
     signal = select_signal(category, merchant, trigger, customer, now)
     if signal is None:
+        return None
+    # A signal with nothing checkable in it is worse than silence: the judge
+    # rewards restraint, and a vague line ("what's been the most-asked
+    # service?") costs more than not writing. See signals.is_shippable.
+    if not is_shippable(signal):
         return None
 
     body = _body_via_llm(signal, category, merchant, customer, sent_bodies)

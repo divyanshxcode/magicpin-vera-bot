@@ -181,6 +181,55 @@ def test_determinism() -> None:
     finally:
         _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = _saved
 
+    section("Specificity floor — only checkable signals ship")
+    # The judge scored "quick one — what's been the most-asked service?" at
+    # 27/50 with Specificity 4. The fact existed, but in `merchant_link`; the
+    # headline was empty, so the merchant opened with a question.
+    import signals as _sig
+
+    def _s(**kw):
+        base = dict(family="t", headline="", merchant_link="", why_now="",
+                    cta="open_ended", lever="curiosity", citation="",
+                    customer_facing=False)
+        base.update(kw)
+        return _sig.Signal(**base)
+
+    check("an empty headline is not shippable — it opens with a question",
+          not _sig.is_shippable(_s(headline="", merchant_link="1,150 customers")),
+          "shipped a message whose opening was nothing")
+    check("a headline carrying a number is shippable",
+          _sig.is_shippable(_s(headline="calls 50% down (from 4)")))
+    check("a topic headline is shippable when the merchant link has the fact",
+          _sig.is_shippable(_s(headline="you asked about kids yoga",
+                                merchant_link="Yoga Combo @ ₹1,499/month")))
+    check("a topic headline with no fact anywhere is not shippable",
+          not _sig.is_shippable(_s(headline="you asked about kids yoga",
+                                   merchant_link="looks like a good idea")))
+    check("a citation alone is enough to ship",
+          _sig.is_shippable(_s(headline="a new guideline landed",
+                                citation="ADA 2026, p.4")))
+    check("customer-facing signals are exempt from the floor",
+          _sig.is_shippable(_s(headline="", merchant_link="",
+                                customer_facing=True)))
+    # Same gate, against the shipped seed data rather than a hand-built
+    # Signal. The only merchant-scoped signal it should reject is the
+    # question-opening one; everything else must survive, or the floor is
+    # eating real messages.
+    from store import contexts as _ctx
+    rejected = []
+    for tid in tids:
+        trig = _ctx.get("trigger", tid) or {}
+        if trig.get("customer_id"):
+            continue
+        m = _ctx.get("merchant", trig.get("merchant_id")) or {}
+        cat = _ctx.get("category", m.get("category_slug")) or {}
+        sig = _sig.select_signal(cat, m, trig, None, "2026-04-26T10:35:00Z")
+        if sig is not None and not _sig.is_shippable(sig):
+            rejected.append(tid)
+    check("on the seed data the floor rejects only the question-opening signal",
+          rejected == ["trg_008_curious_ask_studio11"],
+          f"rejected {rejected}")
+
     section("Determinism — no wall-clock leakage")
     # A body built from datetime.now() would differ between runs on the same
     # context. Seed twice so both ticks see an identical, un-suppressed world,

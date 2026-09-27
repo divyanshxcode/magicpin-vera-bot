@@ -69,15 +69,22 @@ def fmt_int(value: Any) -> str:
     return f"{n:,}"
 
 
-def fmt_pct(value: Any, places: int = 1) -> str:
-    """Format a ratio (0.021) as a percentage (2.1%)."""
+def fmt_pct(value: Any, places: Optional[int] = None) -> str:
+    """Format a ratio (0.021) as a percentage.
+
+    Defaults to the fewest places that preserve the value, so 0.30 renders as
+    "30%" rather than the odd-looking "30.0%", while 0.021 stays "2.1%".
+    """
     try:
         f = float(value)
     except (TypeError, ValueError):
         return ""
     if f == 0:
         return ""
-    return f"{f * 100:.{places}f}%"
+    pctv = f * 100
+    if places is None:
+        places = 0 if abs(pctv - round(pctv)) < 1e-9 else (1 if abs(pctv * 10 - round(pctv * 10)) < 1e-9 else 2)
+    return f"{pctv:.{places}f}%"
 
 
 def fmt_signed_pct(value: Any, places: int = 0) -> str:
@@ -424,13 +431,24 @@ def _month_range_matches(rng: str, month: int) -> bool:
 
 
 def customer_first_name(customer: dict) -> str:
+    """Display name for a customer, respecting honorifics.
+
+    `customer_first_name` must not return "Mr." for a customer named
+    "Mr. Sharma" — that renders as "Hi Mr." and reads as a bug. Honorific
+    prefixes are kept whole so the greeting stays respectful, which matters
+    for the senior-citizen pharmacy cases.
+    """
     name = str(dig(customer, "identity", "name", default="") or "").strip()
     if not name:
         return ""
     # Names like "Aanya (parent: Sneha)" -> "Aanya"
     name = re.split(r"\(", name)[0].strip()
-    first = re.split(r"[\s'’]+", name)[0]
-    return first if len(first) > 1 else ""
+    parts = [p for p in re.split(r"\s+", name) if p]
+    if not parts:
+        return ""
+    if parts[0].endswith(".") and len(parts) > 1:
+        return f"{parts[0]} {parts[1]}"   # "Mr. Sharma", "Dr. Iyer"
+    return parts[0]
 
 
 def customer_is_via_mediary(customer: dict) -> bool:

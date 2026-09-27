@@ -46,6 +46,9 @@ class Signal:
     offer: Optional[dict] = None
     digest_refs: list[str] = field(default_factory=list)
     notes: str = ""
+    #: A literal question to put to the merchant. Kept out of `headline` so
+    #: the composer can render it as a question rather than a statement.
+    question: str = ""
 
     def to_dict(self) -> dict:
         return {
@@ -295,7 +298,10 @@ def _compliance_signal(category: dict, merchant: dict, trigger: dict, now: str) 
         family="alert",
         headline=headline,
         why_now=(f"the circular landed {when}" if when else "the circular just landed"),
-        citation=str(payload.get("source", "")) or "regulator circular",
+        # Only cite a source the payload actually carries. Inventing
+        # "regulator circular" is exactly the kind of fabricated provenance
+        # the judge treats as a hallucination.
+        citation=str(payload.get("source", "")),
         merchant_link=affected or "your current shelf and repeat-Rx list",
         cta=CTA_BINARY,
         lever="loss_aversion",
@@ -484,28 +490,49 @@ def _planning_signal(merchant: dict, trigger: dict) -> Optional[Signal]:
     topic = str(payload.get("intent_topic", "")).strip()
     last = str(payload.get("merchant_last_message", "")).strip()
     topic_label = topic.replace("_", " ") if topic else "what you asked about"
+    # Prefer the merchant's own words over a paraphrase of the topic. Saying
+    # both ("you asked about X" + "you said: X") is redundant and reads badly.
+    if last:
+        headline = ""
+    else:
+        headline = f"you asked about {topic_label}"
     return Signal(
         family="planning",
-        headline=f"you asked about {topic_label}",
+        headline=headline,
         why_now="you were mid-conversation on it",
-        merchant_link=(f'you said: "{last[:90]}"' if last else ""),
+        merchant_link=(f'you said: "{last}"' if last else ""),
         cta=CTA_CONFIRM,
         lever="effort_externalization",
     )
 
 
 def _curious_signal(merchant: dict, category: dict) -> Optional[Signal]:
-    """The 'asking the merchant' lever — the one Vera almost never uses."""
-    offer = g.offer_title(g.primary_offer(merchant))
+    """The 'asking the merchant' lever — the one Vera almost never uses.
+
+    The brief calls this out explicitly: production Vera's biggest miss is
+    social proof and asking the merchant, and both "barely fire today". So the
+    signal has to carry an actual question. Without `question` set this
+    composes a message that promises a question and never asks one, which
+    scores worse than sending nothing.
+    """
+    biz = g.dig(merchant, "identity", "name", default="") or "your business"
+    biz = biz.split("'")[0].strip()
     agg = g.dig(merchant, "customer_aggregate", default={}) or {}
     total = agg.get("total_unique_ytd") or agg.get("total_active_members")
-    link = f"you have {g.fmt_int(total)} customers on file" if total else ""
+    offer = g.offer_title(g.primary_offer(merchant))
+
+    link_parts = []
+    if total:
+        link_parts.append(f"{g.fmt_int(total)} customers on file")
     if offer:
-        link += (", and " if link else "") + f"{offer} already running"
+        link_parts.append(f"{offer} already running")
+    link = " and ".join(link_parts) if link_parts else ""
+
     return Signal(
         family="curious",
-        headline="one question, then I'll do the work",
-        why_now="no agenda — just your own service mix",
+        headline="",
+        question=f"Quick one — what's been the most-asked service at {biz} this week?",
+        why_now="no agenda, just your own numbers",
         merchant_link=link,
         cta=CTA_OPEN,
         lever="asking_merchant",
@@ -943,11 +970,16 @@ def select_signal(
     # Merchant scope.
     if kind in ("research_digest", "regulation_change", "supply_alert",
                 "cde_opportunity", "category_seasonal"):
-        signals = _research_signals(category, merchant, trigger, now)
+        # A trigger payload that names the actual event is more specific than
+        # the category's generic digest entry about the same event. For a
+        # supply alert carrying molecule + batch numbers, those batch numbers
+        # ARE the specificity score — so use the payload alone rather than
+        # ranking it against a vaguer summary of itself.
         if kind in ("regulation_change", "supply_alert"):
-            extra = _compliance_signal(category, merchant, trigger, now)
-            if extra:
-                signals.insert(0, extra)
+            direct = _compliance_signal(category, merchant, trigger, now)
+            if direct is not None:
+                return direct
+        signals = _research_signals(category, merchant, trigger, now)
     elif kind in ("perf_dip", "perf_spike", "seasonal_perf_dip"):
         signals = _perf_signals(merchant, trigger, now)
     elif kind == "review_theme_emerged":

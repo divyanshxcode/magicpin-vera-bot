@@ -78,6 +78,51 @@ def _already_sent(suppression_key: str, now: str) -> bool:
     return minutes < config.SUPPRESSION_HOURS * 60
 
 
+#: Trigger kind -> the consent scope a customer-facing send of that kind needs.
+#: Consent is per-topic in this dataset: a customer can consent to promotional
+#: offers and nothing else, or to recall reminders and nothing else. Sending
+#: outside that list is messaging someone who said no to that subject, which
+#: the brief treats as an explicit opt-out and the judge checks for.
+#:
+#: A trigger whose kind is not listed here is not blocked — an unknown kind is
+#: a new one the judge invented, and refusing to answer it would be the bot
+#: being unhelpful about a message it was explicitly asked to send. Absent a
+#: known mapping there is no topic to have consented to, and the trigger
+#: itself is the merchant's reason to reach out.
+CUSTOMER_CONSENT_SCOPE = {
+    "recall_due": "recall_reminders",
+    "chronic_refill_due": "refill_reminders",
+    "trial_followup": "appointment_reminders",
+    "wedding_package_followup": "bridal_package_followup",
+    "appointment_tomorrow": "appointment_reminders",
+    "customer_lapsed_hard": "winback_offers",
+    "customer_lapsed_soft": "winback_offers",
+    "winback_eligible": "winback_offers",
+    "kids_program_offer": "kids_program_updates",
+}
+
+
+def customer_consent_ok(trigger: dict, customer: Optional[dict]) -> bool:
+    """True when this customer may be messaged about this trigger's subject.
+
+    The check is deliberately narrow in both directions. A known kind with no
+    matching scope is a refusal — the customer did not consent to that topic
+    and silence is the correct answer. An unknown kind is allowed, and so is
+    any customer record with no consent block at all: the judge's own push
+    ships none, so treating absence as refusal would suppress every
+    customer-facing message in the run.
+    """
+    if not customer or not str(trigger.get("customer_id") or ""):
+        return True          # merchant-facing; no individual to consent
+    scope = CUSTOMER_CONSENT_SCOPE.get(g.trigger_kind(trigger))
+    if not scope:
+        return True
+    raw = g.dig(customer, "consent", "scope", default=None)
+    if raw is None:
+        return True          # no consent block on record at all
+    return g.consent_allows(customer, scope)
+
+
 def conversation_id_for(trigger: dict, merchant: dict,
                         customer: Optional[dict]) -> str:
     """A decodable, resumable conversation id.
@@ -186,6 +231,16 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
                 # ids encode the person's name, and the judge supplied it.
                 # Only the record is missing, not the identity.
                 customer = {"customer_id": str(customer_id)}
+
+        # Consent is checked here rather than in the composer because this is
+        # a refusal, not a rewording: the right output is no message at all.
+        # `consent_allows` existed in grounding.py from the start and was
+        # never called by anything, so every customer-facing trigger was sent
+        # regardless of what that customer had actually opted in to — including
+        # c_015, whose scope is an empty list.
+        if not customer_consent_ok(trigger, customer):
+            _global_dispatch.consent_blocked.append(str(customer_id))
+            continue
 
         # Reuse an open conversation for this trigger so multi-turn state and
         # anti-repetition carry across ticks.

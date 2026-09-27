@@ -290,6 +290,10 @@ class DispatchState:
     opted_out: set[str] = field(default_factory=set)
     # conversation_ids the judge has ended
     closed_conversations: set[str] = field(default_factory=set)
+    # customers we declined to message because their consent scope did not
+    # cover the trigger's subject. Kept so healthz can show a suppression
+    # instead of it looking like a trigger that produced nothing.
+    consent_blocked: list[str] = field(default_factory=list)
 
     def reset(self) -> None:
         """Forget everything we have sent, in place.
@@ -302,6 +306,7 @@ class DispatchState:
         self.last_sent_to.clear()
         self.opted_out.clear()
         self.closed_conversations.clear()
+        self.consent_blocked.clear()
         self.last_tick_at = ""
 
 

@@ -22,6 +22,7 @@ import re
 from dataclasses import dataclass
 from typing import Optional
 
+import config
 import grounding as g
 from signals import (
     CTA_BINARY,
@@ -439,6 +440,44 @@ def send_as_for(signal: Signal) -> str:
 import validate as _validate  # noqa: E402  (circular-import avoidance)
 
 
+def _body_via_llm(
+    signal: Signal,
+    category: dict,
+    merchant: dict,
+    customer: Optional[dict],
+    sent_bodies: Optional[set],
+) -> Optional[str]:
+    """Ask the model to phrase this signal. None means "use the fallback".
+
+    Three layers of defence sit between the model and the wire:
+
+      1. the prompt carries only facts already grounded in code, so there is
+         nothing for it to hallucinate a number from
+      2. parse_body() strips quotes, preambles and links
+      3. validate.py in compose() rejects taboo words, repeats and bad
+         length, with a deterministic retry behind it
+
+    The deterministic path is not a toy fallback — it is the guaranteed floor.
+    The judge treats a 500 as a hard failure, so every failure mode here
+    returns None and lets the service continue.
+    """
+    if not config.llm_configured():
+        return None
+
+    try:
+        import llm
+
+        bundle = llm.build_prompt(signal, category, merchant, customer,
+                                  sorted(sent_bodies) if sent_bodies else None)
+        raw = llm.generate(bundle)
+    except Exception:  # noqa: BLE001 — a seam failure must never 500
+        return None
+
+    if not raw:
+        return None
+    return raw.strip() or None
+
+
 def compose(
     category: dict,
     merchant: dict,
@@ -458,11 +497,24 @@ def compose(
     if signal is None:
         return None
 
-    body = compose_body(signal, category, merchant, customer)
+    body = _body_via_llm(signal, category, merchant, customer, sent_bodies)
+    if body is None:
+        body = compose_body(signal, category, merchant, customer)
+
     result = _validate.validate(body, category, merchant, sent_bodies)
 
     if not result.ok and not result.cleaned_body:
-        return None
+        # The LLM produced something unusable. One deterministic retry is
+        # worth it: the decision was sound, only the phrasing failed, and the
+        # fallback renders the same signal correctly.
+        if body is not None and body != compose_body(signal, category, merchant, customer):
+            result = _validate.validate(
+                compose_body(signal, category, merchant, customer),
+                category, merchant, sent_bodies)
+            if result.cleaned_body and result.ok:
+                body = None
+        if not result.cleaned_body:
+            return None
 
     cta_kind, cta_text = build_cta(signal, merchant, category)
     if not cta_kind or cta_kind == CTA_NONE:

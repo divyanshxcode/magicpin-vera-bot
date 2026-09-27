@@ -1,0 +1,49 @@
+# Render blueprint. Lets the service be created from the repo without filling
+# in the dashboard, and keeps the build/start/health settings in version
+# control next to the code they configure.
+#
+# Secrets are NOT here. LLM_API_KEY is set in the Render dashboard as an
+# environment variable, so it never enters git history.
+#
+# Deploy with:  New -> Blueprint -> point at this repo
+#
+# If you deploy manually instead, these are the three settings that matter:
+#   Build Command   pip install -r requirements.txt
+#   Start Command   python main.py
+#   Health Check    /v1/healthz
+
+services:
+  - type: web
+    name: magicpin-vera-bot
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    healthCheckPath: /v1/healthz
+    # The judge's request timeout is 30s. Render's default 100s is far longer
+    # than any endpoint should take, and a slow one should fail loudly rather
+    # than hold a connection open.
+    healthCheckTimeout: 45
+    autoDeploy: false
+    envVars:
+      # Identity the judge reads from GET /v1/metadata.
+      - key: TEAM_NAME
+        value: "Divyansh Singh"
+      - key: TEAM_MEMBERS
+        value: "Divyansh Singh"
+      - key: CONTACT_EMAIL
+        value: "divyanshsingh_23cs147@dtu.ac.in"
+
+      # LLM. Left unset the bot still runs, on the deterministic grounded
+      # composer — correct but noticeably stiffer prose.
+      #
+      # LLM_API_KEY is deliberately absent. Set it in the dashboard.
+      - key: LLM_PROVIDER
+        value: "nous"
+      - key: LLM_MODEL
+        value: "poolside/laguna-s-2.1:free"
+      - key: LLM_TIMEOUT_S
+        value: "12"
+      - key: TICK_DEADLINE_S
+        value: "20"

@@ -1,12 +1,15 @@
 """Process entrypoint.
 
-Railway runs `python -m server` (or the uvicorn startCommand in railway.toml);
-this makes the app importable and runnable either way, and keeps the bind
-address correct for a container.
+Render runs `python main.py`; Railway runs the uvicorn startCommand in
+railway.toml. Both reach this same app, and both need the bind address to be
+0.0.0.0.
 
 Binding to 0.0.0.0 is not optional. Uvicorn defaults to 127.0.0.1, which is
 unreachable from outside the container, and the judge's healthcheck would time
 out against a service that is otherwise working perfectly.
+
+PORT comes from the platform. Render and Railway both inject it; the 8080
+fallback is only for running this by hand.
 """
 
 from __future__ import annotations

@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+"""End-to-end smoke test for the Vera bot's HTTP contract.
+
+Runs the real ASGI app in-process (no server needed) and asserts the exact
+response shapes the judge harness depends on. Grows with each phase; run it
+after every change:
+
+    .venv/bin/python smoke_test.py
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+from pathlib import Path
+
+from fastapi.testclient import TestClient
+
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
+import server
+from store import contexts, conversations, dispatch
+
+DATASET = Path("/Users/divyansh-air/Local Disk/Codes/Github Clones/magicpin/dataset")
+
+GREEN, RED, YELLOW, DIM, RESET = "\033[92m", "\033[91m", "\033[93m", "\033[2m", "\033[0m"
+
+_passed: list[str] = []
+_failed: list[str] = []
+
+
+def check(name: str, cond: bool, detail: str = "") -> bool:
+    if cond:
+        _passed.append(name)
+        print(f"  {GREEN}[PASS]{RESET} {name}")
+    else:
+        _failed.append(name)
+        print(f"  {RED}[FAIL]{RESET} {name} {DIM}{detail}{RESET}")
+    return cond
+
+
+def section(title: str) -> None:
+    print(f"\n{YELLOW}--- {title} ---{RESET}")
+
+
+def load(path: Path):
+    return json.loads(path.read_text())
+
+
+# --------------------------------------------------------------------------
+
+
+def test_healthz_metadata(client: TestClient) -> None:
+    section("healthz + metadata")
+    r = client.get("/v1/healthz")
+    check("healthz returns 200", r.status_code == 200, f"got {r.status_code}")
+    d = r.json()
+    check("healthz has status/uptime/contexts_loaded",
+          all(k in d for k in ("status", "uptime_seconds", "contexts_loaded")), str(d))
+    check("status == ok", d.get("status") == "ok", str(d.get("status")))
+    check("contexts_loaded has all 4 scope keys",
+          set(d.get("contexts_loaded", {})) == {"category", "merchant", "customer", "trigger"},
+          str(d.get("contexts_loaded")))
+    check("fresh bot has zero contexts loaded",
+          all(v == 0 for v in d["contexts_loaded"].values()), str(d["contexts_loaded"]))
+
+    r = client.get("/v1/metadata")
+    check("metadata returns 200", r.status_code == 200, f"got {r.status_code}")
+    d = r.json()
+    for key in ("team_name", "team_members", "model", "approach", "version"):
+        check(f"metadata has {key}", key in d and d[key] not in (None, "", []), str(d))
+
+
+def test_context_push(client: TestClient) -> None:
+    section("context push (idempotency + versioning)")
+    cat = load(DATASET / "categories" / "dentists.json")
+    merch = load(DATASET / "merchants_seed.json")["merchants"][0]
+    trig = load(DATASET / "triggers_seed.json")["triggers"][0]
+    cust = load(DATASET / "customers_seed.json")["customers"][0]
+
+    r = client.post("/v1/context", json={
+        "scope": "category", "context_id": "dentists", "version": 1,
+        "payload": cat, "delivered_at": "2026-04-26T09:45:00Z"})
+    check("push category v1 -> 200", r.status_code == 200, f"got {r.status_code} {r.text[:120]}")
+    d = r.json()
+    check("push returns accepted=true", d.get("accepted") is True, str(d))
+    check("push returns ack_id", bool(d.get("ack_id")), str(d))
+    check("push returns stored_at", bool(d.get("stored_at")), str(d))
+
+    r = client.post("/v1/context", json={
+        "scope": "category", "context_id": "dentists", "version": 1,
+        "payload": cat, "delivered_at": "2026-04-26T09:45:00Z"})
+    check("re-push same version -> 409", r.status_code == 409, f"got {r.status_code}")
+    d = r.json()
+    check("409 says stale_version", d.get("reason") == "stale_version", str(d))
+    check("409 reports current_version", d.get("current_version") == 1, str(d))
+
+    bumped = json.loads(json.dumps(cat))
+    bumped["digest"] = bumped.get("digest", []) + [
+        {"id": "d_new", "kind": "research", "title": "NEW injected item", "source": "test"}]
+    r = client.post("/v1/context", json={
+        "scope": "category", "context_id": "dentists", "version": 2,
+        "payload": bumped, "delivered_at": "2026-04-26T10:50:00Z"})
+    check("push higher version -> 200", r.status_code == 200, f"got {r.status_code}")
+    stored = contexts.get("category", "dentists")
+    check("v2 replaced atomically (new digest present)",
+          any(i.get("id") == "d_new" for i in stored.get("digest", [])))
+    check("old v1 content preserved across replace",
+          any(i.get("id") == "d_2026W17_jida_fluoride" for i in stored.get("digest", [])))
+
+    r = client.post("/v1/context", json={
+        "scope": "merchant", "context_id": merch["merchant_id"], "version": 1, "payload": merch})
+    check("push merchant -> 200", r.status_code == 200, f"got {r.status_code}")
+    r = client.post("/v1/context", json={
+        "scope": "trigger", "context_id": trig["id"], "version": 1, "payload": trig})
+    check("push trigger -> 200", r.status_code == 200, f"got {r.status_code}")
+    r = client.post("/v1/context", json={
+        "scope": "customer", "context_id": cust["customer_id"], "version": 1, "payload": cust})
+    check("push customer -> 200", r.status_code == 200, f"got {r.status_code}")
+
+    section("context push (validation)")
+    r = client.post("/v1/context", json={
+        "scope": "bogus", "context_id": "x", "version": 1, "payload": {}})
+    check("bad scope -> 400", r.status_code == 400, f"got {r.status_code}")
+    check("bad scope reason == invalid_scope", r.json().get("reason") == "invalid_scope", r.text)
+
+    r = client.post("/v1/context", json={
+        "scope": "category", "context_id": "", "version": 1, "payload": {}})
+    check("missing context_id -> 400", r.status_code == 400, f"got {r.status_code}")
+
+    r = client.post("/v1/context", content="not json at all")
+    check("malformed body -> 400", r.status_code == 400, f"got {r.status_code}")
+
+    r = client.get("/v1/healthz")
+    counts = r.json()["contexts_loaded"]
+    check("healthz reflects pushed contexts",
+          counts == {"category": 1, "merchant": 1, "customer": 1, "trigger": 1}, str(counts))
+
+
+def test_tick_reply_shapes(client: TestClient) -> None:
+    section("tick + reply response shape")
+    r = client.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z", "available_triggers": []})
+    check("tick returns 200", r.status_code == 200, f"got {r.status_code}")
+    check("tick returns actions list", isinstance(r.json().get("actions"), list), r.text)
+
+    r = client.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
+                                       "available_triggers": ["trg_001_research_digest_dentists"]})
+    check("tick with unknown trigger still 200", r.status_code == 200, f"got {r.status_code}")
+
+    r = client.post("/v1/reply", json={
+        "conversation_id": "conv_test_1", "from_role": "merchant",
+        "message": "Yes please", "received_at": "2026-04-26T10:42:00Z", "turn_number": 2})
+    check("reply returns 200", r.status_code == 200, f"got {r.status_code}")
+    d = r.json()
+    check("reply has action in {send,wait,end}",
+          d.get("action") in ("send", "wait", "end"), str(d))
+    check("reply has rationale", bool(d.get("rationale")), str(d))
+
+    r = client.post("/v1/reply", json={"message": "hi"})
+    check("reply without conversation_id -> 200 + safe action",
+          r.status_code == 200 and r.json().get("action") in ("send", "wait", "end"), r.text)
+
+
+def test_no_500(client: TestClient) -> None:
+    section("robustness (never 500)")
+    cases = [
+        ("/v1/context", {}),
+        ("/v1/context", {"scope": "merchant"}),
+        ("/v1/context", {"scope": "merchant", "context_id": "m", "version": "abc", "payload": {}}),
+        ("/v1/tick", {"available_triggers": "not-a-list"}),
+        ("/v1/tick", {}),
+        ("/v1/reply", {"conversation_id": "c", "message": None}),
+        ("/v1/reply", {"conversation_id": "c", "turn_number": "x", "message": "hi"}),
+    ]
+    for path, body in cases:
+        r = client.post(path, json=body)
+        check(f"{path} {json.dumps(body)[:44]} -> not 5xx",
+              r.status_code < 500, f"got {r.status_code}")
+
+
+def main() -> int:
+    print(f"{YELLOW}{'=' * 62}{RESET}\n  Vera bot — endpoint smoke test\n{YELLOW}{'=' * 62}{RESET}")
+    client = TestClient(server.app)
+
+    test_healthz_metadata(client)
+    test_context_push(client)
+    test_tick_reply_shapes(client)
+    test_no_500(client)
+
+    total = len(_passed) + len(_failed)
+    print(f"\n{YELLOW}{'=' * 62}{RESET}")
+    if _failed:
+        print(f"  {RED}{len(_failed)}/{total} FAILED{RESET}")
+        for name in _failed:
+            print(f"    {RED}x{RESET} {name}")
+        return 1
+    print(f"  {GREEN}ALL {total} CHECKS PASSED{RESET}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

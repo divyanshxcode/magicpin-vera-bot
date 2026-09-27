@@ -216,15 +216,17 @@ def test_tick_dispatch(client: TestClient) -> None:
     check("tick composes actions", len(actions) > 0, f"got {len(actions)}")
     check("tick respects 20-action cap", len(actions) <= 20, f"got {len(actions)}")
 
-    # m_001 is deliberately absent here: test_tick_reply_shapes already ran a
-    # tick for trg_001 against the same simulated timestamp, so m_001 is in
-    # cooldown and its suppression key is spent. That is the dedup guard doing
-    # its job across ticks, not a coverage gap.
+    # At the shipped default both restraint windows are 0, so a tick covers
+    # every merchant it has a trigger for, including one a previous test in
+    # this file already messaged. That used to be asserted the other way round
+    # on the strength of a cooldown left over from test_tick_reply_shapes —
+    # coverage that only held because of an unrelated earlier test, and broke
+    # the moment the default changed. Assert what actually ships.
     merchant_ids = {a["merchant_id"] for a in actions}
     all_merchants = {m["merchant_id"] for m in load(DATASET / "merchants_seed.json")["merchants"]}
-    check("covers every merchant not already messaged",
-          merchant_ids == (all_merchants - {"m_001_drmeera_dentist_delhi"}),
-          f"got {len(merchant_ids)} merchants")
+    check("covers every merchant with a trigger at the shipped default",
+          merchant_ids == all_merchants,
+          f"got {len(merchant_ids)} of {len(all_merchants)}")
 
     required = {"conversation_id", "merchant_id", "send_as", "trigger_id",
                 "template_name", "template_params", "body", "cta",
@@ -249,17 +251,35 @@ def test_tick_dispatch(client: TestClient) -> None:
 
     # --- guards ---------------------------------------------------------
     section("tick guards (restraint + dedup)")
-    r2 = client.post("/v1/tick", json={"now": "2026-04-26T10:40:00Z",
-                                        "available_triggers": tids})
-    check("re-tick 5 min later sends nothing new (cooldown + suppression)",
-          len(r2.json().get("actions", [])) == 0,
-          f"got {len(r2.json().get('actions', []))} — spamming")
+    # Windows enabled for this block only — the shipped default is 0, and the
+    # property under test here is that suppression and cooldown WORK when
+    # configured, not that they happen to be on.
+    import config as _cfg
+    _saved = (_cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES)
+    _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = 1.0, 15
+    try:
+        r2 = client.post("/v1/tick", json={"now": "2026-04-26T10:40:00Z",
+                                           "available_triggers": tids})
+        check("re-tick 5 min later sends nothing new (cooldown + suppression)",
+              len(r2.json().get("actions", [])) == 0,
+              f"got {len(r2.json().get('actions', []))} — spamming")
 
-    r3 = client.post("/v1/tick", json={"now": "2026-04-28T10:40:00Z",
-                                        "available_triggers": tids})
-    check("after 2 simulated days some sends resume",
-          len(r3.json().get("actions", [])) > 0,
-          "suppression never expires")
+        r3 = client.post("/v1/tick", json={"now": "2026-04-28T10:40:00Z",
+                                           "available_triggers": tids})
+        check("after 2 simulated days some sends resume",
+              len(r3.json().get("actions", [])) > 0,
+              "suppression never expires")
+    finally:
+        _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = _saved
+
+    # With the shipped default (windows 0) a repeat tick must still be allowed
+    # to send, or the bot cannot be re-evaluated against a long-lived process.
+    _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = _saved
+    r_repeat = client.post("/v1/tick", json={"now": "2026-04-28T11:00:00Z",
+                                            "available_triggers": tids})
+    check("at the shipped default, a re-run still sends",
+          len(r_repeat.json().get("actions", [])) > 0,
+          f"got {len(r_repeat.json().get('actions', []))}")
 
     r4 = client.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
                                         "available_triggers": ["trg_does_not_exist"]})

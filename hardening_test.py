@@ -208,6 +208,15 @@ def test_determinism() -> None:
     check("a citation alone is enough to ship",
           _sig.is_shippable(_s(headline="a new guideline landed",
                                 citation="ADA 2026, p.4")))
+    # A month range is a timeframe the merchant can check, so a seasonal beat
+    # qualifies. Requiring a full day-precision date made the floor reject
+    # "Diwali corporate gifting (Oct-Nov)" and the trigger went silent.
+    check("a month range counts as a checkable fact",
+          _sig.is_shippable(_s(headline="you asked about a corporate package",
+                                merchant_link="Diwali corporate gifting (Oct-Nov)")))
+    check("a bare season name counts too",
+          _sig.is_shippable(_s(headline="demand is shifting",
+                                merchant_link="the monsoon season surge")))
     check("customer-facing signals are exempt from the floor",
           _sig.is_shippable(_s(headline="", merchant_link="",
                                 customer_facing=True)))
@@ -229,6 +238,24 @@ def test_determinism() -> None:
     check("on the seed data the floor rejects only the question-opening signal",
           rejected == ["trg_008_curious_ask_studio11"],
           f"rejected {rejected}")
+
+    # A qualifier in the topic changes what a useful answer must be. Asked
+    # about a *kids* programme, matching the word "yoga" to an adult
+    # membership produced a 20/50 message with Decision Quality 2/10 — the
+    # gyms pack ships no kids offer at all.
+    from store import contexts as _c2
+    gyms = _c2.get("category", "gyms") or {}
+    restaurants = _c2.get("category", "restaurants") or {}
+    check("a kids topic is not answered with an adult-only offer",
+          "Yoga + Strength" not in _sig._planning_artifact(
+              gyms, {}, "kids_yoga_summer_camp"),
+          _sig._planning_artifact(gyms, {}, "kids_yoga_summer_camp"))
+    check("a qualifier-matched seasonal beat beats a shared-word offer",
+          "corporate" in _sig._planning_artifact(
+              restaurants, {}, "corporate_bulk_thali_package").lower(),
+          _sig._planning_artifact(restaurants, {}, "corporate_bulk_thali_package"))
+    check("an unqualified topic still finds a topical artifact",
+          bool(_sig._planning_artifact(gyms, {}, "strength_training")))
 
     section("Determinism — no wall-clock leakage")
     # A body built from datetime.now() would differ between runs on the same

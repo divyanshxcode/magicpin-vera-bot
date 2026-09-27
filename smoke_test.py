@@ -162,6 +162,89 @@ def test_tick_reply_shapes(client: TestClient) -> None:
           r.status_code == 200 and r.json().get("action") in ("send", "wait", "end"), r.text)
 
 
+def test_tick_dispatch(client: TestClient) -> None:
+    """Real actions, plus the guards that stop us spamming merchants."""
+    section("tick dispatch")
+    from store import conversations, dispatch
+
+    # Load every category/merchant/trigger from the seed data so the tick has
+    # real context to compose against.
+    for f in (DATASET / "categories").glob("*.json"):
+        cat = load(f)
+        client.post("/v1/context", json={"scope": "category", "context_id": cat["slug"],
+                                          "version": 1, "payload": cat})
+    for m in load(DATASET / "merchants_seed.json")["merchants"]:
+        client.post("/v1/context", json={"scope": "merchant",
+                                          "context_id": m["merchant_id"],
+                                          "version": 1, "payload": m})
+    for c in load(DATASET / "customers_seed.json")["customers"]:
+        client.post("/v1/context", json={"scope": "customer",
+                                          "context_id": c["customer_id"],
+                                          "version": 1, "payload": c})
+    triggers = load(DATASET / "triggers_seed.json")["triggers"]
+    for t in triggers:
+        client.post("/v1/context", json={"scope": "trigger", "context_id": t["id"],
+                                          "version": 1, "payload": t})
+
+    tids = [t["id"] for t in triggers]
+    r = client.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
+                                      "available_triggers": tids})
+    check("tick returns 200", r.status_code == 200, f"got {r.status_code}")
+    actions = r.json().get("actions", [])
+    check("tick composes actions", len(actions) > 0, f"got {len(actions)}")
+    check("tick respects 20-action cap", len(actions) <= 20, f"got {len(actions)}")
+
+    # m_001 is deliberately absent here: test_tick_reply_shapes already ran a
+    # tick for trg_001 against the same simulated timestamp, so m_001 is in
+    # cooldown and its suppression key is spent. That is the dedup guard doing
+    # its job across ticks, not a coverage gap.
+    merchant_ids = {a["merchant_id"] for a in actions}
+    all_merchants = {m["merchant_id"] for m in load(DATASET / "merchants_seed.json")["merchants"]}
+    check("covers every merchant not already messaged",
+          merchant_ids == (all_merchants - {"m_001_drmeera_dentist_delhi"}),
+          f"got {len(merchant_ids)} merchants")
+
+    required = {"conversation_id", "merchant_id", "send_as", "trigger_id",
+                "template_name", "template_params", "body", "cta",
+                "suppression_key", "rationale"}
+    for a in actions:
+        missing = required - set(a)
+        check(f"action {a.get('trigger_id', '?')[:28]} has all required fields",
+              not missing, f"missing {missing}")
+        check(f"action {a.get('trigger_id', '?')[:28]} body is non-empty",
+              bool(a.get("body", "").strip()))
+        check(f"action {a.get('trigger_id', '?')[:28]} send_as valid",
+              a.get("send_as") in ("vera", "merchant_on_behalf"), str(a.get("send_as")))
+
+    bodies = [a["body"] for a in actions]
+    check("no URL in any body",
+          not any("http://" in b or "https://" in b or "www." in b for b in bodies))
+    check("no verbatim duplicate bodies in one tick",
+          len(bodies) == len(set(bodies)), "duplicate body in one tick")
+    merchants = [a["merchant_id"] for a in actions]
+    check("at most one action per merchant per tick",
+          len(merchants) == len(set(merchants)), "two actions for one merchant")
+
+    # --- guards ---------------------------------------------------------
+    section("tick guards (restraint + dedup)")
+    r2 = client.post("/v1/tick", json={"now": "2026-04-26T10:40:00Z",
+                                        "available_triggers": tids})
+    check("re-tick 5 min later sends nothing new (cooldown + suppression)",
+          len(r2.json().get("actions", [])) == 0,
+          f"got {len(r2.json().get('actions', []))} — spamming")
+
+    r3 = client.post("/v1/tick", json={"now": "2026-04-28T10:40:00Z",
+                                        "available_triggers": tids})
+    check("after 2 simulated days some sends resume",
+          len(r3.json().get("actions", [])) > 0,
+          "suppression never expires")
+
+    r4 = client.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
+                                        "available_triggers": ["trg_does_not_exist"]})
+    check("unknown trigger id -> empty actions, 200",
+          r4.status_code == 200 and r4.json().get("actions") == [], r4.text)
+
+
 def test_no_500(client: TestClient) -> None:
     section("robustness (never 500)")
     cases = [
@@ -186,6 +269,7 @@ def main() -> int:
     test_healthz_metadata(client)
     test_context_push(client)
     test_tick_reply_shapes(client)
+    test_tick_dispatch(client)
     test_no_500(client)
 
     total = len(_passed) + len(_failed)

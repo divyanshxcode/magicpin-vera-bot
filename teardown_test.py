@@ -110,11 +110,30 @@ def main() -> int:
     check("works after two consecutive teardowns",
           len(r.get("actions", [])) > 0, f"{len(r.get('actions', []))} actions")
 
-    # 7. Suppression is genuinely cleared — a second identical tick is empty.
-    r2 = c.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
-                                  "available_triggers": ids}).json()
-    check("suppression still applies after teardown (not over-cleared)",
-          len(r2.get("actions", [])) == 0, f"{len(r2.get('actions', []))} actions")
+    # 7. Dispatch bookkeeping is genuinely cleared. Teardown must wipe
+    #    suppression without wiping the guards themselves — a wipe that
+    #    disabled dedup entirely would be a different bug, not a fix.
+    #
+    #    The shipped default for both windows is 0, so the dedup this checks
+    #    for is off unless it is switched on. Turn it on for the assertion
+    #    rather than assuming a default, so the check keeps testing what it
+    #    was written to test.
+    import config as _cfg
+    _old = (_cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES)
+    _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = 1.0, 15
+    try:
+        c.post("/v1/teardown")
+        ids = seed(c)
+        a = c.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
+                                     "available_triggers": ids}).json()
+        check("dedup is live after teardown, not over-cleared",
+              len(a.get("actions", [])) > 0, f"{len(a.get('actions', []))} actions")
+        r2 = c.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
+                                      "available_triggers": ids}).json()
+        check("and it still suppresses a repeat of the same tick",
+              len(r2.get("actions", [])) == 0, f"{len(r2.get('actions', []))} actions")
+    finally:
+        _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = _old
 
     print(f"\n  {GREEN if passed == total else RED}{passed}/{total} checks passed{RESET}\n")
     return 0 if passed == total else 1

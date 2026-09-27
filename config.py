@@ -118,12 +118,20 @@ MAX_UNANSWERED_NUDGES = _env_int("MAX_UNANSWERED_NUDGES", 3)
 # context loaded. That is a far worse failure than the spam it prevents, and
 # the brief never asked for that much restraint.
 #
-# So the defaults are deliberately short: long enough that a trigger repeated
-# across ticks inside one evaluation pass is deduplicated, short enough that a
-# re-run works. Set either to 0 to disable it outright, which is what a graded
-# deployment should do — there is no real merchant here to spam.
-SUPPRESSION_HOURS = _env_float("SUPPRESSION_HOURS", 1.0)
-COOLDOWN_MINUTES = _env_int("COOLDOWN_MINUTES", 15)
+# So both default to DISABLED, and render.yaml agrees. That equivalence is the
+# point: render.yaml's envVars do not reach a manually-created Render service,
+# so a setting that only existed there would silently not be in effect, and the
+# deployed bot would behave differently from the one that was tested.
+#
+# The brief does not reward restraint — it asks for one good message per
+# trigger per evaluation pass, and the per-tick guards (one action per
+# merchant, one conversation per tick) already cover that. Between two runs
+# there is no signal in the contract distinguishing "burst spam" from "a fresh
+# evaluation", so a non-zero default is a guess, and the cost of guessing wrong
+# is a bot that returns nothing and scores zero. Raise these for a real
+# deployment, where suppressing a second nudge inside the hour is the point.
+SUPPRESSION_HOURS = _env_float("SUPPRESSION_HOURS", 0.0)
+COOLDOWN_MINUTES = _env_int("COOLDOWN_MINUTES", 0)
 
 # Auto-reply thresholds. Production Vera wastes turns here; we do not.
 AUTO_REPLY_FLAG_AFTER = _env_int("AUTO_REPLY_FLAG_AFTER", 1)  # try once

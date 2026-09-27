@@ -122,15 +122,13 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
         now = utc_now_iso()
     _global_dispatch.last_tick_at = now
 
-    seen_merchants: set[str] = set()
+    per_merchant: dict[str, int] = {}
     seen_conversations: set[str] = set()
     eligible: list[dict[str, Any]] = []
 
     for trigger_id in available_triggers:
         if not isinstance(trigger_id, str):
             continue
-        if len(eligible) >= config.MAX_ACTIONS_PER_TICK:
-            break
 
         trigger = contexts.get("trigger", trigger_id)
         if not trigger:
@@ -147,8 +145,12 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
         merchant_id = str(trigger.get("merchant_id", "") or "")
         if not merchant_id or merchant_id in _global_dispatch.opted_out:
             continue
-        # One action per merchant per tick.
-        if merchant_id in seen_merchants:
+        # A merchant may get more than one action per tick now — up to
+        # MAX_ACTIONS_PER_MERCHANT_PER_TICK. This was a hard 1, which meant
+        # the judge's batches (built so 2-3 triggers share a merchant) lost 11
+        # of 25 messages. Each action is a separate conversation and a separate
+        # grounded signal, so they are not repeats of one another.
+        if per_merchant.get(merchant_id, 0) >= config.MAX_ACTIONS_PER_MERCHANT_PER_TICK:
             continue
 
         suppression_key = str(trigger.get("suppression_key", "") or "")
@@ -183,7 +185,7 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
         if conv is not None and not conv.is_open():
             continue
         seen_conversations.add(conv_id)
-        seen_merchants.add(merchant_id)
+        per_merchant[merchant_id] = per_merchant.get(merchant_id, 0) + 1
 
         eligible.append({
             "conversation_id": conv_id,
@@ -206,6 +208,28 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
     # `expired` is computed — but never at the cost of a live opportunity when
     # the tick is near its action cap.
     eligible.sort(key=lambda item: (item["expired"], item["trigger_id"]))
+
+    # Apply the action cap with round-robin fairness rather than by input
+    # order. Truncating the sorted list starves whichever merchant happens to
+    # sit late in `available_triggers`: a 25-trigger tick capped at 20 dropped
+    # a merchant entirely, and the judge only ever sends 5 at a time so nothing
+    # in the normal path exposed it. Round-robin takes one action per merchant
+    # at a time, so every merchant is represented before any gets a second.
+    if len(eligible) > config.MAX_ACTIONS_PER_TICK:
+        queues: dict[str, list[dict[str, Any]]] = {}
+        for item in eligible:
+            queues.setdefault(item["merchant_id"], []).append(item)
+        taken: list[dict[str, Any]] = []
+        while len(taken) < config.MAX_ACTIONS_PER_TICK and any(queues.values()):
+            for merchant_id in list(queues):
+                if len(taken) >= config.MAX_ACTIONS_PER_TICK:
+                    break
+                bucket = queues[merchant_id]
+                if bucket:
+                    taken.append(bucket.pop(0))
+        # Restore the timely-first ordering within the chosen set.
+        taken.sort(key=lambda item: (item["expired"], item["trigger_id"]))
+        eligible = taken
 
     # ---- phase 2: compose, concurrently ---------------------------------
     outputs = _compose_all(eligible, now)

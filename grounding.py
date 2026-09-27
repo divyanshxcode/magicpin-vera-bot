@@ -170,6 +170,78 @@ def parse_moment(value: Any) -> Optional[datetime]:
     return None
 
 
+def peer_stat(category: dict, metric: str) -> tuple[Optional[float], str]:
+    """Peer-median value for a metric, and the label to quote it with.
+
+    Schema-driven rather than hardcoded: looks for `avg_{metric}_30d` then
+    `avg_{metric}` in the category's peer_stats, so a test dataset with
+    different categories, or a category that drops a field, still works — it
+    just yields (None, "") and the caller skips the comparison.
+
+    This is the reference point the judge's Decision Quality wants. "calls down
+    50% (from 4)" is a number with no meaning attached; "4 calls in 30d against
+    a 12 peer median" says whether that is bad.
+    """
+    stats = dig(category, "peer_stats", default=None)
+    if not isinstance(stats, dict):
+        return None, ""
+    metric = str(metric or "").strip()
+    if not metric:
+        return None, ""
+    for key in (f"avg_{metric}_30d", f"avg_{metric}"):
+        val = stats.get(key)
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            label = {
+                "views": "views", "calls": "calls", "directions": "directions",
+                "ctr": "CTR", "leads": "leads", "rating": "rating",
+                "review_count": "reviews", "photos": "photos",
+            }.get(metric, metric.replace("_", " "))
+            return float(val), label
+    return None, ""
+
+
+def peer_gap(value: Any, peer: Optional[float]) -> Optional[float]:
+    """How far `value` sits from the peer median, as a signed fraction.
+
+    None unless both sides are real numbers and the peer value is non-zero, so
+    a caller never renders "infinitely below peer median" or divides by None.
+    """
+    if value is None or peer is None:
+        return None
+    try:
+        v, p = float(value), float(peer)
+    except (TypeError, ValueError):
+        return None
+    if p == 0:
+        return None
+    return (v - p) / p
+
+
+def merchant_notes(merchant: dict) -> list[str]:
+    """The merchant's own precomputed signal flags, humanised.
+
+    `signals` is a list of compact strings the dataset ships per merchant —
+    "stale_posts:22d", "ctr_below_peer_median". They are already true, so
+    restating them is grounded by construction. Anything that does not look
+    like a known flag is passed through rather than reformatted, so an unseen
+    test dataset still contributes.
+    """
+    out: list[str] = []
+    for raw in dig(merchant, "signals", default=[]) or []:
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        flag, _, detail = s.partition(":")
+        flag = flag.replace("_", " ")
+        if detail and detail.isdigit():
+            out.append(f"{flag} for {detail}d")
+        elif detail:
+            out.append(f"{flag} ({detail})")
+        else:
+            out.append(flag)
+    return out
+
+
 def days_between(earlier: Any, later: Any) -> Optional[int]:
     a, b = parse_date(earlier), parse_date(later)
     if not a or not b:

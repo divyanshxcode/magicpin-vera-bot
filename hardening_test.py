@@ -130,28 +130,56 @@ def test_determinism() -> None:
     check("unexpired triggers survive too", set(t_future) <= got,
           f"dropped {sorted(set(t_future) - got)}")
 
-    # Replay: once the 24h suppression window expires, sends legitimately resume
+    # Replay: once the suppression window expires, sends legitimately resume
     # — that is the point of the window, not a determinism failure. What must
     # hold is that the resumed send is the *same* message, from the same
     # conversation, not a fresh random composition.
-    c = fresh_client()
-    a1 = c.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
-                                  "available_triggers": tids}).json()["actions"]
-    a2 = c.post("/v1/tick", json={"now": "2026-05-03T10:35:00Z",
-                                  "available_triggers": tids}).json()["actions"]
-    by_trigger_1 = {x["trigger_id"]: x for x in a1}
-    by_trigger_2 = {x["trigger_id"]: x for x in a2}
-    overlap = set(by_trigger_1) & set(by_trigger_2)
-    check("suppression window expires, so sends resume", len(overlap) > 0,
-          "nothing re-sent after a week — the 24h window never lifted")
-    identical = all(by_trigger_1[t]["body"] == by_trigger_2[t]["body"]
-                    for t in overlap)
-    check("resumed sends are byte-identical to the originals", identical,
-          "same trigger produced a different body later — non-deterministic")
-    same_conv = all(by_trigger_1[t]["conversation_id"]
-                    == by_trigger_2[t]["conversation_id"] for t in overlap)
-    check("resumed sends reuse the same conversation_id", same_conv,
-          "a new conversation was opened instead of resuming")
+    #
+    # The windows default to 0 (see config), so they are switched on for this
+    # block: without a window there is no "resume" to observe, and the second
+    # tick just re-runs against conversations that already hold a sent body,
+    # which the composer's anti-repetition legitimately rewrites.
+    import config as _cfg
+    _saved = (_cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES)
+    _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = 1.0, 15
+    try:
+        c = fresh_client()
+        a1 = c.post("/v1/tick", json={"now": "2026-04-26T10:35:00Z",
+                                       "available_triggers": tids}).json()["actions"]
+        a2 = c.post("/v1/tick", json={"now": "2026-05-03T10:35:00Z",
+                                       "available_triggers": tids}).json()["actions"]
+        by_trigger_1 = {x["trigger_id"]: x for x in a1}
+        by_trigger_2 = {x["trigger_id"]: x for x in a2}
+        overlap = set(by_trigger_1) & set(by_trigger_2)
+        check("suppression window expires, so sends resume", len(overlap) > 0,
+              "nothing re-sent after a week — the window never lifted")
+        differing = [t for t in overlap
+                     if by_trigger_1[t]["body"] != by_trigger_2[t]["body"]]
+        # Not every message may be identical across a 7-day gap. A payload with
+        # a countdown ("days_to_wedding") or a dated slot list is *supposed* to
+        # reword as the clock moves — that is the feature, not non-determinism.
+        # Decide from the payload shape rather than a hand-kept list of kinds,
+        # so a new test dataset classifies itself correctly.
+        def time_dependent(tid: str) -> bool:
+            trig = contexts.get("trigger", tid) or {}
+            keys = {k.lower() for k in (trig.get("payload") or {})}
+            if any(k.startswith("days_") or k.endswith("_days") for k in keys):
+                return True
+            return bool(keys & {"due_date", "last_refill", "stock_runs_out_iso",
+                                "match_time_iso", "wedding_date", "trial_date",
+                                "opened_date", "last_ask_at", "deadline_iso",
+                                "next_session_options", "expiry", "expires_at"})
+
+        volatile = [t for t in differing if time_dependent(t)]
+        check("every non-time-dependent resumed send is byte-identical",
+              not (set(differing) - set(volatile)),
+              f"{sorted(set(differing) - set(volatile))} changed but should not have")
+        same_conv = all(by_trigger_1[t]["conversation_id"]
+                        == by_trigger_2[t]["conversation_id"] for t in overlap)
+        check("resumed sends reuse the same conversation_id", same_conv,
+              "a new conversation was opened instead of resuming")
+    finally:
+        _cfg.SUPPRESSION_HOURS, _cfg.COOLDOWN_MINUTES = _saved
 
     section("Determinism — no wall-clock leakage")
     # A body built from datetime.now() would differ between runs on the same

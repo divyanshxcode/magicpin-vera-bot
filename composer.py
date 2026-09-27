@@ -221,8 +221,8 @@ def _terminate(text: str) -> str:
     return f"{text}."
 
 
-def _clause(text: str) -> str:
-    return _terminate(_cap(text))
+def _clause(text: str, cap: bool = True) -> str:
+    return _terminate(_cap(text) if cap else (text or "").strip())
 
 
 def _cite(citation: str) -> str:
@@ -235,14 +235,24 @@ def assemble(salutation: str, sentences: list[str]) -> str:
     """Join a salutation and a list of sentences into one message.
 
     The salutation takes a comma (not a full stop) so it reads as speech —
-    "Dr. Meera, your CTR is…". Every following fragment is capitalised and
-    terminated independently, because the fragments arrive from many places
-    (signal builders, digest items, payloads) and several start lowercase.
+    "Dr. Meera, your CTR is…". The fragments arrive from many places (signal
+    builders, digest items, payloads) and several start lowercase.
+
+    The first fragment after a comma-salutation is left exactly as its signal
+    builder wrote it: the sentence is still running, so capitalising it
+    produced "Dr. Bharat, Calls 50% down week over week" — a capital letter
+    where a clause continues. Fragments that legitimately open with a proper
+    noun ("IPL match…", "JIDA Oct 2026…") are unaffected, because the source
+    string already capitalises them. Every later fragment is capitalised as
+    before, since those do start a new sentence.
     """
     out = ""
     if salutation:
         out = _cap(salutation).rstrip(" .") + ","
-    body = " ".join(_clause(s) for s in sentences if (s or "").strip())
+    parts = [(s or "").strip() for s in sentences if (s or "").strip()]
+    body = " ".join(
+        _clause(s, cap=(not out or i > 0)) for i, s in enumerate(parts)
+    )
     if out and body:
         return f"{out} {body}"
     return out or body

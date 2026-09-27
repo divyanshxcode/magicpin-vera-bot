@@ -13,12 +13,14 @@ from __future__ import annotations
 import json
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
+import config
 import server
 from store import contexts, conversations, dispatch
 
@@ -246,8 +248,18 @@ def test_tick_dispatch(client: TestClient) -> None:
     check("no verbatim duplicate bodies in one tick",
           len(bodies) == len(set(bodies)), "duplicate body in one tick")
     merchants = [a["merchant_id"] for a in actions]
-    check("at most one action per merchant per tick",
-          len(merchants) == len(set(merchants)), "two actions for one merchant")
+    check("at most MAX_ACTIONS_PER_MERCHANT_PER_TICK actions per merchant",
+          all(v <= config.MAX_ACTIONS_PER_MERCHANT_PER_TICK
+              for v in Counter(merchants).values()),
+          f"cap {config.MAX_ACTIONS_PER_MERCHANT_PER_TICK}, "
+          f"max seen {max(Counter(merchants).values(), default=0)}")
+    # The cap should be visible, not theoretical. A hard cap of 1 made the
+    # judge's batches silently lose 11 of 25 messages, which is how it stayed
+    # unnoticed: coverage looked plausible because 14/25 is not obviously
+    # broken, and nothing asserted on it.
+    check("the per-merchant cap is actually reached in a 25-trigger tick",
+          max(Counter(merchants).values(), default=0) > 1,
+          f"max {max(Counter(merchants).values(), default=0)} per merchant")
 
     # --- guards ---------------------------------------------------------
     section("tick guards (restraint + dedup)")

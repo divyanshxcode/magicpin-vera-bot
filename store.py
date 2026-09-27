@@ -60,6 +60,11 @@ class ContextStore:
         self._data: dict[tuple[str, str], ContextEntry] = {}
         self._lock = threading.RLock()
 
+    def reset(self) -> None:
+        """Drop all stored context. Tests only — see ConversationStore.reset."""
+        with self._lock:
+            self._data.clear()
+
     def push(
         self, scope: str, context_id: str, version: int, payload: dict, delivered_at: str = ""
     ) -> tuple[bool, Optional[ContextEntry], str]:
@@ -199,6 +204,17 @@ class ConversationStore:
         self._data: dict[str, Conversation] = {}
         self._lock = threading.RLock()
 
+    def reset(self) -> None:
+        """Drop all conversation state.
+
+        Only the test suites call this. The judge never restarts the bot
+        mid-test, so there is no production path that needs this — it exists
+        so a test can assert determinism against genuinely fresh state instead
+        of state left behind by the previous test.
+        """
+        with self._lock:
+            self._data.clear()
+
     def create(
         self,
         conversation_id: str,
@@ -262,6 +278,14 @@ class DispatchState:
     opted_out: set[str] = field(default_factory=set)
     # conversation_ids the judge has ended
     closed_conversations: set[str] = field(default_factory=set)
+
+    def reset(self) -> None:
+        """Forget everything we have sent. Tests only — see ConversationStore.reset."""
+        self.sent_suppressions.clear()
+        self.last_sent_to.clear()
+        self.opted_out.clear()
+        self.closed_conversations.clear()
+        self.last_tick_at = ""
 
 
 contexts = ContextStore()

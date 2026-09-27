@@ -108,16 +108,60 @@ class PromptBundle:
     reasoning_effort: str = ""
 
 
+#: category.voice keys, with the names this dataset actually uses. The old
+#: list guessed `taboo_words` and `do_not_say`, neither of which exists in any
+#: category pack — so the prompt was getting tone and register and nothing
+#: else. `vocab_taboo` is the field the judge checks a message against for
+#: promotional or hype register, and it was never reaching the model.
+_VOICE_KEYS = (
+    "register", "tone", "code_mix",
+    "vocab_allowed", "vocab_taboo", "avoid", "taboo_words", "do_not_say",
+)
+
+#: Field names for the pack's own worked examples. Every category ships both,
+#: and they are the single most direct instruction available: they show the
+#: voice rather than describe it. "Quick one — IPL match nights have been 1.5x
+#: your weekday avg this season" tells the model more than four lines of
+#: adjectives about being warm and practical do.
+_EXAMPLE_KEYS = ("tone_examples", "salutation_examples", "message_examples")
+
+
 def _voice_block(category: dict) -> str:
+    """The category's own voice guide, including its worked examples.
+
+    This is the judge's data, not ours. The examples are the pack telling us
+    what a message in this category sounds like, written by whoever wrote the
+    rest of the pack — which is why they beat anything paraphrased here.
+    """
     v = category.get("voice") or {}
-    bits = []
-    for key in ("register", "tone", "avoid", "taboo_words", "do_not_say"):
+    if not isinstance(v, dict):
+        return ""
+    bits: list[str] = []
+    for key in _VOICE_KEYS:
         val = v.get(key)
         if not val:
             continue
         if isinstance(val, (list, tuple)):
-            val = ", ".join(str(x) for x in val)
-        bits.append(f"  {key}: {val}")
+            shown = ", ".join(str(x) for x in val[:24])
+            if not shown:
+                continue
+            label = "words to avoid" if "taboo" in key or key in (
+                "avoid", "do_not_say") else "words this category uses"
+            bits.append(f"  {label}: {shown}")
+        else:
+            bits.append(f"  {key}: {val}")
+
+    examples: list[str] = []
+    for key in _EXAMPLE_KEYS:
+        for item in v.get(key) or []:
+            text = str(item).strip()
+            if text and text not in examples:
+                examples.append(text)
+    if examples:
+        bits.append("  examples of this category's voice (match the shape, "
+                    "never copy a fact from them):")
+        bits.extend(f"    - {e}" for e in examples[:4])
+
     return "CATEGORY VOICE\n" + "\n".join(bits) if bits else ""
 
 

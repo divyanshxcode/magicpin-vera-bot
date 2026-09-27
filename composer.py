@@ -185,7 +185,7 @@ CTA_BY_FAMILY = {
     "winback": "Want me to switch it back on?",
     "gbp": "Want me to walk you through it?",
     "milestone": "Want me to nudge the last few?",
-    "event": "Want me to draft it tonight?",
+    "event": "Want me to draft the match-night post?",
     "festival": "Want me to build the package?",
     "dormant": "Want the short version?",
     # The brief calls "asking the merchant" one of the levers Vera almost
@@ -197,8 +197,33 @@ CTA_BY_FAMILY = {
 }
 
 
+#: Overrides for when the finding itself determines the ask. A CTA that
+#: ignores what the message just said reads as a template — "Want me to draft
+#: it tonight?" attached to a Saturday-covers-down message asks the merchant to
+#: act on a night the same message told them to skip. Keyed on a phrase that
+#: only appears when that specific finding is present.
+CTA_BY_FINDING: tuple[tuple[str, str], ...] = (
+    # Saturday match: the useful action is to hold the promo, not run one.
+    ("below a normal Saturday",
+     "Want me to draft the Tue-Thu push instead, and hold Saturday?"),
+    ("above a normal night",
+     "Want me to draft tonight's match-night post?"),
+    # A dip that is still above the median is a nudge, not a rescue.
+    ("this is a dip, not a slide",
+     "Want me to show you which day it actually fell?"),
+    # Near parity: there is no gap to close, so do not imply one.
+    ("in line with the", "Want me to pull the source so you can check it?"),
+)
+
+
 def build_cta(signal: Signal, merchant: dict, category: dict) -> tuple[str, str]:
-    """Return (cta_kind, cta_sentence). Empty sentence means no CTA."""
+    """Return (cta_kind, cta_sentence). Empty sentence means no CTA.
+
+    The ask is chosen by what the message found, not only by what family it
+    belongs to. That matters more than it sounds: the same trigger can carry
+    "covers are down" or "covers are up", and a CTA written for one of those
+    actively misdirects on the other.
+    """
     if signal.customer_facing:
         return _customer_cta(signal)
 
@@ -209,6 +234,20 @@ def build_cta(signal: Signal, merchant: dict, category: dict) -> tuple[str, str]
     kind = signal.cta
     if kind == CTA_BINARY:
         return CTA_BINARY, "Reply YES to go ahead, or tell me to leave it."
+    if kind != CTA_CONFIRM:
+        # Search every prose field, not just the link. A merchant-facing signal
+        # can put its finding in the headline (the match-night signal does)
+        # and the link in the offer name, so matching on the link alone misses
+        # exactly the case the override exists for.
+        #
+        # The needles are folded to match the folded haystack. Written in the
+        # natural mixed case of a sentence, "below a normal Saturday" never
+        # matches "…12% below a normal saturday…", so the table silently did
+        # nothing at all.
+        found = f"{signal.headline} {signal.merchant_link} {signal.why_now}".lower()
+        for needle, ask in CTA_BY_FINDING:
+            if needle.lower() in found:
+                return CTA_OPEN, ask
     if kind == CTA_CONFIRM:
         return CTA_CONFIRM, default
     return CTA_OPEN, default
@@ -446,7 +485,11 @@ def _customer_body(
     # program" and nothing about the Bridal Trial @ ₹999 Kavya had actually
     # paid for — the fact was built, ranked and then thrown away.
     if signal.merchant_link:
-        sentences.append(_clause(signal.merchant_link))
+        link_clause = _clause(signal.merchant_link)
+        # `_clause` is written for merchant-facing prose and leaves a trailing
+        # period, which reads as a truncated line in the middle of a message
+        # that continues. Only strip it here — merchant bodies end there.
+        sentences.append(link_clause.rstrip("."))
 
     # The offer, only if genuinely active.
     offer = signal.offer or g.primary_offer(merchant)

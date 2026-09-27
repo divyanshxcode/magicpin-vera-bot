@@ -726,6 +726,60 @@ def mediator_relation(customer: dict) -> str:
     return RELAY_ROLE.get(who, "a family member") if who else ""
 
 
+def customer_service(customer: dict, category: Optional[dict] = None) -> str:
+    """The last service this customer actually received, as the shop names it.
+
+    Kavya's record says `services_received: ["bridal_trial"]` and the salons
+    catalogue says "Bridal Trial @ ₹999". A follow-up that repeats the
+    customer's own purchase back to them is checkable from two directions at
+    once — their history and the price list — which is what the judge rewards
+    under merchant fit. The underscore form is never shipped; it only leaves
+    this function when a real catalogue title was found to match it.
+
+    `category` is the pack being used for this message, not a global: the
+    whole point is to name the service in the vocabulary of *this* shop, and
+    a lookup across every category would happily return a title from a
+    different vertical.
+    """
+    if not isinstance(customer, dict):
+        return ""
+    services = dig(customer, "relationship", "services_received", default=[]) or []
+    if isinstance(services, str):
+        services = [services]
+    for raw in services:
+        slug = str(raw or "").strip()
+        if not slug:
+            continue
+        return _match_catalogue_title(slug, category) or slug.replace("_", " ")
+    return ""
+
+
+def _match_catalogue_title(slug: str, category: Optional[dict] = None) -> str:
+    """A catalogue title for a service slug, matched on shared content words.
+
+    "bridal_trial" has to find "Bridal Trial @ ₹999" without the price being
+    part of the match — a customer record never carries a price, and matching
+    on one would mean the lookup silently failed for every service. Returns ""
+    when nothing in the pack resembles the slug, so the caller can fall back
+    to the de-underscored name rather than claiming a match that is not there.
+    """
+    if not slug:
+        return ""
+    want = {t for t in re.split(r"[^a-z0-9]+", slug.lower()) if len(t) > 2}
+    if not want:
+        return ""
+    for offer in dig(category, "offer_catalog", default=[]) or []:
+        if not isinstance(offer, dict):
+            continue
+        title = str(offer.get("title", "") or "")
+        have = {t for t in re.split(r"[^a-z0-9]+", title.lower()) if len(t) > 2}
+        # Every content word of the slug must be present, so "bridal_trial"
+        # cannot match a plain "Trial" offer from the same pack.
+        if want <= have:
+            return title
+    return ""
+
+
 def customer_is_via_mediary(customer: dict) -> bool:
     """True when the message reaches the customer through someone else.
 

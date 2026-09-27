@@ -437,15 +437,31 @@ def _customer_body(
     if signal.headline:
         sentences.append(signal.headline)
 
+    # The merchant link — the line that ties this to *this* shop, and for a
+    # customer-facing message the only place the customer's own history can
+    # appear. This used to be dropped on the floor: _customer_body rebuilt its
+    # sentences from the headline, the offer and the slots, so every
+    # merchant_link a customer signal carried was silently discarded before it
+    # reached the body. That is why the bridal follow-up said "skin prep
+    # program" and nothing about the Bridal Trial @ ₹999 Kavya had actually
+    # paid for — the fact was built, ranked and then thrown away.
+    if signal.merchant_link:
+        sentences.append(_clause(signal.merchant_link))
+
     # The offer, only if genuinely active.
     offer = signal.offer or g.primary_offer(merchant)
     offer_title = g.offer_title(offer)
-    if offer_title:
+    if offer_title and offer_title.lower() not in " ".join(sentences).lower():
         sentences.append(mix_phrase("offer", lang=lang, offer=offer_title)
                          if lang.startswith("mix") else f"{offer_title} is running")
 
-    # Slots, if the trigger gave us any.
-    if signal.slots:
+    # Slots, if the trigger gave us any. Skipped when merchant_link already
+    # named them — the trial follow-up's link is "next sessions on Sat 3 May",
+    # so listing the slots again repeats the same date twice in one message.
+    already_named = " ".join(sentences).lower()
+    if signal.slots and not any(
+            str(s.get("label", "")).strip()[:10].lower() in already_named
+            for s in signal.slots if s.get("label")):
         labels = [str(s.get("label", "")).strip() for s in signal.slots if s.get("label")]
         labels = [l for l in labels if l][:2]
         if labels:

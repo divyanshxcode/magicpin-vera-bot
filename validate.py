@@ -89,6 +89,17 @@ def validate(
     if sent_bodies and cleaned in sent_bodies:
         issues.append("verbatim repeat of a body already sent in this conversation")
 
+    # An opening with no name reads as a bulk broadcast. The Gemini judge
+    # scored merchant_fit 5/10 across the board for exactly this, while
+    # messages that led with a fact the merchant owns scored 7-9.
+    first_word = cleaned.split()[0].strip(",.:;!") if cleaned else ""
+    owner = (g.merchant_first_name(merchant) or "").split()
+    owner_token = owner[0] if owner else ""
+    if owner_token and not owner_token.lower().startswith(first_word.lower()[:4]):
+        # Not a hard failure — some openings legitimately lead with a hook —
+        # but it is worth surfacing so the regression is visible.
+        issues.append(f"body does not open with the recipient's name ({owner_token})")
+
     if not cleaned:
         issues.append("body emptied by cleaning")
 

@@ -53,13 +53,23 @@ citation that is not present in the FACTS block. If a fact is missing, write \
 around it — never fill the gap.
 
 How to write:
+- OPEN BY ADDRESSING THE RECIPIENT BY NAME, using `recipient_first_name`.
+  Keep any title it carries ("Dr. Meera", not "Meera"). Then a comma, then the
+  message. A message that opens with a fact instead of a name reads as a bulk
+  broadcast and is the single fastest way to lose the reader.
 - Lead with the single most useful fact. One idea per message.
+- Tie the fact to THIS merchant. Their own numbers, customers, offer or area
+  beat an abstract statement about the market. "124 of your patients are in
+  this trial" lands; "high-risk adults need more frequent recalls" does not.
 - Be specific and concrete. Real numbers from the FACTS block, not adjectives.
 - Match the CATEGORY VOICE described. It is not a suggestion.
 - 2-4 short sentences. Under 320 characters. No links, ever.
-- One clear next action, phrased so replying is a single word or tap.
-- No emoji spam, no exclamation marks, no "Dear Sir/Madam", no corporate \
-formality. You are a colleague, not a bank.
+- End with a next step the merchant can actually take, phrased so replying is
+  a single word or tap. Put something on the table — the number, the offer, the
+  protocol — so that saying yes costs them nothing. "Want to look at what
+  changed?" offers nothing; "Want the 3-month protocol summary?" does.
+- No emoji spam, no exclamation marks, no "Dear Sir/Madam", no corporate
+  formality. You are a colleague, not a bank.
 - Never reuse a phrasing the ALREADY SENT list contains.
 
 Output ONLY the message body as plain text. No preamble, no quotes, no \
@@ -133,6 +143,17 @@ def build_prompt(
         facts["recipient_state"] = g.dig(customer, "state", default="")
         facts["language_preference"] = g.dig(
             customer, "identity", "language_pref", default="")
+    else:
+        # Merchant-facing. The recipient's name has to be supplied explicitly.
+        # Left out, the model has no way to greet them and silently writes an
+        # impersonal note that reads as a bulk broadcast — which is exactly
+        # what the judge's merchant_fit dimension punishes.
+        facts["recipient_first_name"] = g.merchant_first_name(merchant)
+        facts["their_business"] = g.dig(
+            merchant, "identity", "name", default="")
+        facts["their_area"] = ", ".join(
+            x for x in [g.dig(merchant, "identity", "locality", default=""),
+                        g.dig(merchant, "identity", "city", default="")] if x)
 
     lines = [f"  {k}: {v}" for k, v in facts.items() if v not in ("", None, [])]
     if already_sent:

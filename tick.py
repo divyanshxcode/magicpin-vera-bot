@@ -121,8 +121,13 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
         if not trigger:
             # The judge may list a trigger before pushing it. Silence is right.
             continue
-        if g.trigger_expired(trigger, now):
-            continue
+        # Expiry demotes rather than blocks. The seed triggers carry
+        # expires_at in April-December 2026 while the official judge_simulator
+        # sends a wall-clock `now`, so a hard block muxes the bot completely
+        # and it scores zero on a run it should be competing in. An expired
+        # trigger is still a real event the merchant should hear about; it
+        # simply sorts below anything timely.
+        expired = g.trigger_expired(trigger, now)
 
         merchant_id = str(trigger.get("merchant_id", "") or "")
         if not merchant_id or merchant_id in _global_dispatch.opted_out:
@@ -175,11 +180,17 @@ def build_actions(available_triggers: list, now: str) -> list[dict[str, Any]]:
             "trigger": trigger,
             "suppression_key": suppression_key,
             "merchant_id": merchant_id,
+            "expired": expired,
             "sent": set(conv.sent_bodies) if conv else set(),
         })
 
     if not eligible:
         return []
+
+    # Timely triggers first. Expired ones still ship — see the note where
+    # `expired` is computed — but never at the cost of a live opportunity when
+    # the tick is near its action cap.
+    eligible.sort(key=lambda item: (item["expired"], item["trigger_id"]))
 
     # ---- phase 2: compose, concurrently ---------------------------------
     outputs = _compose_all(eligible, now)

@@ -70,14 +70,22 @@ class ContextStore:
     ) -> tuple[bool, Optional[ContextEntry], str]:
         """Store a context version.
 
-        Returns (accepted, current_entry, reason). `accepted` is False when the
-        incoming version is not newer than what we already hold.
+        Returns (accepted, current_entry, reason).
+
+        Version rules, per the challenge brief:
+          - re-posting the *same* (context_id, version) is idempotent and
+            succeeds — a no-op that still acks, so a judge that pushes the
+            opening context again never sees a failure
+          - only a strictly *lower* version is a conflict
+          - a higher version replaces the prior one atomically
         """
         with self._lock:
             key = (scope, context_id)
             existing = self._data.get(key)
-            if existing is not None and existing.version >= version:
+            if existing is not None and existing.version > version:
                 return False, existing, "stale_version"
+            if existing is not None and existing.version == version:
+                return True, existing, "duplicate_version"
             self._data[key] = ContextEntry(
                 scope=scope,
                 context_id=context_id,

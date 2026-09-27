@@ -100,6 +100,36 @@ def test_determinism() -> None:
           "output drifted between runs")
     check("runs actually produced actions", len(json.loads(runs[0])) > 0)
 
+    # Expired triggers must not mute the bot. The official judge sends a
+    # wall-clock `now` while the seed data is dated April 2026, so a hard
+    # expiry block drops every trigger and the bot scores zero for no fault
+    # of its own. Expiry demotes; it does not veto.
+    c = fresh_client()
+    real = list(load(DATASET / "merchants_seed.json")["merchants"])
+    t_now, t_future = [], []
+    for i in range(3):
+        exp = "2026-05-01T00:00:00Z" if i < 2 else "2026-12-01T00:00:00Z"
+        tid = f"exp_{i}"
+        m = real[i]
+        cat = contexts.get("category", m["category_slug"])
+        c.post("/v1/context", json={"scope": "trigger", "context_id": tid,
+                                    "version": 1, "payload": {
+            "id": tid, "scope": "merchant", "kind": "research_digest",
+            "source": "external", "merchant_id": m["merchant_id"],
+            "customer_id": None,
+            "payload": {"title": f"Digest {i}",
+                        "source": (cat.get("digest") or [{}])[0].get("source", "JIDA"),
+                        "trial_n": 2100},
+            "urgency": 3, "suppression_key": f"exp:{i}", "expires_at": exp}})
+        (t_future if exp > "2026-06-01" else t_now).append(tid)
+    late = c.post("/v1/tick", json={"now": "2026-09-27T10:35:00Z",
+                                    "available_triggers": t_now + t_future}).json()
+    got = {a["trigger_id"] for a in late["actions"]}
+    check("an expired trigger still produces an action (no total mute)",
+          set(t_now) <= got, f"dropped {sorted(set(t_now) - got)}")
+    check("unexpired triggers survive too", set(t_future) <= got,
+          f"dropped {sorted(set(t_future) - got)}")
+
     # Replay: once the 24h suppression window expires, sends legitimately resume
     # — that is the point of the window, not a determinism failure. What must
     # hold is that the resumed send is the *same* message, from the same

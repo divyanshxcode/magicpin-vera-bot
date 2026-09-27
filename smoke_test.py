@@ -88,13 +88,20 @@ def test_context_push(client: TestClient) -> None:
     check("push returns ack_id", bool(d.get("ack_id")), str(d))
     check("push returns stored_at", bool(d.get("stored_at")), str(d))
 
+    # The brief: re-posting the same (context_id, version) is idempotent, and
+    # 409 is reserved for "you already have a HIGHER version". Getting this
+    # wrong makes a judge that re-pushes its opening context mark every
+    # context push as FAIL.
     r = client.post("/v1/context", json={
         "scope": "category", "context_id": "dentists", "version": 1,
         "payload": cat, "delivered_at": "2026-04-26T09:45:00Z"})
-    check("re-push same version -> 409", r.status_code == 409, f"got {r.status_code}")
+    check("re-push same version -> 200 (idempotent)", r.status_code == 200,
+          f"got {r.status_code} {r.text[:120]}")
     d = r.json()
-    check("409 says stale_version", d.get("reason") == "stale_version", str(d))
-    check("409 reports current_version", d.get("current_version") == 1, str(d))
+    check("idempotent re-push returns accepted=true", d.get("accepted") is True, str(d))
+    check("idempotent re-push still acks", bool(d.get("ack_id")), str(d))
+    check("idempotent re-push does not clobber the stored payload",
+          contexts.get("category", "dentists") == cat)
 
     bumped = json.loads(json.dumps(cat))
     bumped["digest"] = bumped.get("digest", []) + [
@@ -108,6 +115,21 @@ def test_context_push(client: TestClient) -> None:
           any(i.get("id") == "d_new" for i in stored.get("digest", [])))
     check("old v1 content preserved across replace",
           any(i.get("id") == "d_2026W17_jida_fluoride" for i in stored.get("digest", [])))
+
+    # 409 is for a genuinely OLDER version arriving after a newer one.
+    r = client.post("/v1/context", json={
+        "scope": "category", "context_id": "dentists", "version": 1,
+        "payload": {"digest": []}, "delivered_at": "2026-04-26T11:00:00Z"})
+    # v1 < v2 so this must be 409; the digest must survive untouched.
+    check("stale (lower) version -> 409", r.status_code == 409,
+          f"got {r.status_code} {r.text[:120]}")
+    if r.status_code == 409:
+        d = r.json()
+        check("409 says stale_version", d.get("reason") == "stale_version", str(d))
+        check("409 reports current_version=2", d.get("current_version") == 2, str(d))
+        check("409 did not overwrite the stored version",
+              any(i.get("id") == "d_new"
+                  for i in contexts.get("category", "dentists").get("digest", [])))
 
     r = client.post("/v1/context", json={
         "scope": "merchant", "context_id": merch["merchant_id"], "version": 1, "payload": merch})

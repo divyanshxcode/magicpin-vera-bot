@@ -484,6 +484,16 @@ def _body_via_llm(
         return None
 
     if not raw:
+        # Counted here rather than in generate(): this is the exact point the
+        # message stops being model-written and becomes deterministic. Counting
+        # it in the provider would miss a build_prompt failure entirely, and
+        # that is the failure mode that is hardest to see from outside.
+        try:
+            import llm
+
+            llm._bump("fallback")
+        except Exception:  # noqa: BLE001
+            pass
         return None
     return raw.strip() or None
 

@@ -387,11 +387,93 @@ def _cache_get_is_miss(bundle: PromptBundle) -> bool:
 
 
 # --------------------------------------------------------------------------
+# provider reliability
+# --------------------------------------------------------------------------
+
+#: Total attempts per message, i.e. one initial call plus at most
+#: LLM_MAX_ATTEMPTS - 1 retries. Small on purpose: a 10-action tick runs its
+#: calls in parallel, so every retry is also latency on the judge's clock.
+LLM_MAX_ATTEMPTS = 2
+
+#: Cap on any single backoff, whatever Retry-After asks for. A provider that
+#: says "come back in 60s" is telling us something we cannot act on inside a
+#: 30s endpoint budget, so the wait is clamped and the message falls back.
+LLM_MAX_BACKOFF_S = 2.0
+
+#: Statuses worth a second attempt. 429 means the request was well-formed and
+#: the provider was momentarily full; 5xx is a transient server fault. 4xx
+#: otherwise is our own fault (bad key, bad model) and retrying only burns
+#: the tick's budget before falling back to the same answer.
+_RETRYABLE = frozenset({429, 500, 502, 503, 504, 529})
+
+#: Counters for /v1/healthz. A silent degrade to the deterministic composer
+#: looks identical to a good run from the outside — the bot still answers,
+#: still never 500s — which is exactly why a provider problem went unnoticed.
+#: These make the difference visible without logging a single message body.
+_STATS_LOCK = threading.Lock()
+#: Per-thread tick deadline, set by compose_many() for the duration of a job.
+_CTX = threading.local()
+_STATS = {
+    "llm_ok": 0,
+    "fallback": 0,
+    "cached": 0,
+    "rate_limited": 0,
+    "retries": 0,
+    "provider_error": 0,
+    "timeout": 0,
+}
+
+
+def stats() -> dict:
+    with _STATS_LOCK:
+        return dict(_STATS)
+
+
+def reset_stats() -> None:
+    with _STATS_LOCK:
+        for k in _STATS:
+            _STATS[k] = 0
+
+
+def _bump(key: str, n: int = 1) -> None:
+    with _STATS_LOCK:
+        _STATS[key] = _STATS.get(key, 0) + n
+
+
+def _note(reason: str, transient: bool = False) -> None:
+    """Record why a composition fell back, without logging any content."""
+    if transient:
+        _bump("rate_limited" if reason.startswith("http 429") else "provider_error")
+    print(f"        [llm] fallback: {reason}")
+
+
+def _retryable(status: int) -> bool:
+    return status in _RETRYABLE
+
+
+def _retry_delay(r, attempt: int) -> float:
+    """Honour Retry-After when it is something we can actually wait out."""
+    wait = LLM_MAX_BACKOFF_S
+    try:
+        raw = r.headers.get("Retry-After")
+    except Exception:  # noqa: BLE001
+        raw = None
+    if raw:
+        try:
+            wait = min(wait, float(str(raw).strip()))
+        except (TypeError, ValueError):
+            pass  # a date-form Retry-After is not a number of seconds
+    else:
+        wait = min(wait, 0.4 * (2 ** attempt))
+    return max(0.0, wait)
+
+
+# --------------------------------------------------------------------------
 # entrypoint
 # --------------------------------------------------------------------------
 
 
-def generate(bundle: PromptBundle) -> Optional[str]:
+def generate(bundle: PromptBundle, deadline: Optional[float] = None) -> Optional[str]:
     """Call the configured model. Returns None if unavailable or on any failure.
 
     Returning None rather than raising is load-bearing: the judge treats a 500
@@ -401,8 +483,14 @@ def generate(bundle: PromptBundle) -> Optional[str]:
     if not config.llm_configured():
         return None
 
+    if deadline is None:
+        # compose_many() stashes the tick deadline on the worker thread so a
+        # retry here can ask whether there is still budget to spend.
+        deadline = getattr(_CTX, "deadline", None)
+
     cached = cache_get(bundle)
     if cached is not None:
+        _bump("cached")
         return cached
 
     prov = _PROVIDERS.get(config.LLM_PROVIDER)
@@ -437,14 +525,35 @@ def generate(bundle: PromptBundle) -> Optional[str]:
 
         with httpx.Client(timeout=config.LLM_TIMEOUT_S) as client:
             r = client.post(url, json=payload, headers=_headers(config.LLM_PROVIDER, key))
+            # 429 is the one failure worth retrying: it means the request was
+            # fine and the provider was momentarily full. We retry on the
+            # server's own terms where it gives them, and on a short backoff
+            # where it does not — but only ever inside the tick deadline
+            # already computed above, because a slow tick is a worse outcome
+            # than a fallback body. Everything else degrades immediately.
+            for attempt in range(1, LLM_MAX_ATTEMPTS):
+                if not _retryable(r.status_code):
+                    break
+                wait = _retry_delay(r, attempt)
+                if deadline is not None and _remaining(deadline) < wait + 1.5:
+                    # No budget left to make the retry worthwhile. Stopping
+                    # here still leaves time for the deterministic composer.
+                    break
+                _bump("retries")
+                time.sleep(wait)
+                r = client.post(url, json=payload,
+                                headers=_headers(config.LLM_PROVIDER, key))
             if r.status_code >= 400:
+                _note(f"http {r.status_code}", r.status_code in _RETRYABLE)
                 return None
             data = r.json()
     except Exception:  # noqa: BLE001 — any failure must degrade, never 500
+        _note("exception", True)
         return None
 
     body = parse_body(_extract_text(config.LLM_PROVIDER, data)) or None
     if body:
+        _bump("llm_ok")
         # Only successful, non-empty responses are cached — a transient failure
         # must not pin the bot to a fallback body for the life of the process.
         cache_put(bundle, body)
@@ -480,7 +589,16 @@ def compose_many(
     results: list[Optional[str]] = [None] * len(jobs)
 
     def work(idx: int, job: tuple) -> None:
-        results[idx] = _compose_one(*job)
+        # The deadline has to reach generate() so a retry can ask whether
+        # there is still budget. compose() takes no deadline argument, and
+        # threading one through every layer would change a signature the
+        # composer and its tests both depend on — so each pool thread carries
+        # it for the duration of its own job.
+        _CTX.deadline = deadline
+        try:
+            results[idx] = _compose_one(*job)
+        finally:
+            _CTX.deadline = None
 
     with ThreadPoolExecutor(max_workers=min(len(jobs), 8)) as pool:
         futures = {pool.submit(work, i, j): i for i, j in enumerate(jobs)}

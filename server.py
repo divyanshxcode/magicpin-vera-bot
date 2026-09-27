@@ -89,12 +89,27 @@ async def index() -> dict:
 # --------------------------------------------------------------------------
 
 
+def _composition_stats() -> dict:
+    """Provider counters for healthz. Never raises — health must not 500."""
+    try:
+        import llm
+
+        return llm.stats()
+    except Exception:  # noqa: BLE001
+        return {}
+
+
 @app.get("/v1/healthz")
 async def healthz() -> dict:
     return {
         "status": "ok",
         "uptime_seconds": int(time.time() - START_TIME),
         "contexts_loaded": contexts.counts(),
+        # Composition provenance. A degrade from the model to the deterministic
+        # composer is invisible from the outside — the bot still answers every
+        # trigger and still never 500s — so without this a provider outage
+        # looks exactly like a good run. Counters only; no message content.
+        "composition": _composition_stats(),
     }
 
 
